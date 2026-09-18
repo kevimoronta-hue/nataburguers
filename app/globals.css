@@ -10,11 +10,6 @@
   html {
     scroll-behavior: smooth;
     background-color: theme('colors.bg.base');
-    /* En iOS, el elemento que realmente hace de raíz de scroll es <html>,
-       no <body>: si solo <body> tiene overflow-x:hidden, un gesto lateral
-       aún puede arrastrar la página (rebote elástico) antes de que el
-       clip surta efecto. */
-    overflow-x: hidden;
   }
 
   @media (prefers-reduced-motion: reduce) {
