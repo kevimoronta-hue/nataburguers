@@ -108,6 +108,13 @@
     display: none;
   }
 
+  /* TEMP DEBUG: ?noglass — header sin backdrop-filter (liquid glass). */
+  html.nb-noglass .site-header > div {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: rgba(8, 7, 6, 0.96);
+  }
+
   /*
    * La navbar NO depende de `nb-content-revealed`: aparece progresivamente
    * sobre las últimas frames (168→184), mientras el canvas sigue visible.

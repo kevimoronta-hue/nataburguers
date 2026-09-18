@@ -269,6 +269,7 @@ export function MobileFrameSequenceIntro() {
 
   useEffect(() => {
     if (NB_NO_EMBERS) document.documentElement.classList.add('nb-noembers'); // TEMP DEBUG
+    if (/[?&]noglass/.test(window.location.search)) document.documentElement.classList.add('nb-noglass'); // TEMP DEBUG
     const mobile = window.matchMedia(MOBILE_QUERY);
     const reduced = window.matchMedia(REDUCED_MOTION_QUERY);
     function apply() {
