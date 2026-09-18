@@ -40,6 +40,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 const MOBILE_QUERY = '(max-width: 767px)';
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
+// Solo el "Saltar intro" necesita un camino distinto en iOS: revelar
+// contenido + saltar el scroll en el mismo tick es estable en Android/
+// Chrome, pero en iOS/WebKit produce freezes o transiciones rotas. Todo
+// lo demás (preload, render loop, mapping de frames) es idéntico en
+// ambas plataformas.
+const IS_IOS =
+  typeof navigator !== 'undefined' &&
+  (/iP(hone|od|ad)/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
 export function MobileFrameSequenceIntro() {
   const [isMobile, setIsMobile] = useState(false);
 
@@ -556,13 +566,10 @@ function MobileFrameSequence() {
     // dedo: se le quita el foco antes de mover nada.
     (document.activeElement as HTMLElement | null)?.blur?.();
 
-    // Todo en el MISMO tick, de forma síncrona: encadenar el salto a
-    // través de varios requestAnimationFrame demostró ser frágil en iOS
-    // (cualquier gesto o repintado pesado entre medias puede desalinear
-    // los pasos). leer `getBoundingClientRect()` ya fuerza un reflow
-    // síncrono, así que el layout que medimos abajo es el real en el
-    // instante exacto en que lo medimos — no hace falta esperar frames
-    // "para que se estabilice". Prioridad: fiabilidad > animación.
+    // Paso común a ambas plataformas: fija la intro en su estado final
+    // (frame, navbar, badge) SIN tocar todavía el resto del DOM. No
+    // desmonta nada, no resetea `framesRef`, no toca el canvas salvo para
+    // pintar la última frame: la secuencia sigue viva y montada.
     const canvas = canvasRef.current;
     const ctx = getCtx();
     if (canvas && ctx) {
@@ -572,21 +579,39 @@ function MobileFrameSequence() {
       updateBadge(LAST_INDEX);
     }
     updateNavbar(LAST_INDEX);
-    setContentRevealed(true);
 
-    const target = document.getElementById('main-content');
-    if (target) {
+    const jumpToMainContent = () => {
+      const target = document.getElementById('main-content');
+      if (!target) return;
       const html = document.documentElement;
       const prevScrollBehavior = html.style.scrollBehavior;
       html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
       const top = target.getBoundingClientRect().top + window.scrollY;
       window.scrollTo(0, top); // salto directo por pixel, NUNCA scrollIntoView
       html.style.scrollBehavior = prevScrollBehavior;
-    }
+    };
 
-    // Sin trabajo asíncrono pendiente: el candado solo protegía este
-    // mismo tick síncrono, así que se libera de inmediato.
-    skippingRef.current = false;
+    if (IS_IOS) {
+      // iOS/WebKit: revelar el contenido (display:none → block de un
+      // subárbol grande, que además dispara la carga de sus imágenes) en
+      // el MISMO tick que el salto de scroll de ~450vh es lo que produce
+      // el freeze / la transición rota en Safari. Se separan en dos
+      // frames sucesivos; el render loop de la secuencia sigue vivo y
+      // solo se pausa mientras dura esta breve transición.
+      window.requestAnimationFrame(() => {
+        setContentRevealed(true);
+        window.requestAnimationFrame(() => {
+          jumpToMainContent();
+          skippingRef.current = false;
+        });
+      });
+    } else {
+      // Android/desktop: la vía síncrona ya es estable aquí, sin
+      // necesidad de repartirla entre varios frames.
+      setContentRevealed(true);
+      jumpToMainContent();
+      skippingRef.current = false;
+    }
   }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
 
   // ---------------------------------------------------------------------
