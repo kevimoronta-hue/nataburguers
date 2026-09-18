@@ -437,7 +437,7 @@ function MobileFrameSequence() {
 
     function tick() {
       ticking = false;
-      if (skippingRef.current || doneRef.current) return;
+      if (skippingRef.current) return;
 
       const section = sectionRef.current;
       if (section && section.getBoundingClientRect().bottom <= 0) {
@@ -505,7 +505,6 @@ function MobileFrameSequence() {
     }
 
     function onResize() {
-      if (doneRef.current) return; // intro terminada: nada que reajustar en este canvas
       const widthChanged = window.innerWidth !== lastWidth;
       const heightDelta = Math.abs(window.innerHeight - lastHeight);
       if (!widthChanged && heightDelta < RESIZE_MIN_HEIGHT_DELTA) return; // barra de Safari, se ignora
@@ -596,29 +595,24 @@ function MobileFrameSequence() {
         // Salto directo por pixel, NUNCA scrollIntoView: en iOS,
         // scrollIntoView dentro de un ancestro sticky puede quedar
         // peleando con el momentum scroll todavía activo o con el cambio
-        // de altura de la toolbar dinámica de Safari. Se recalcula el
-        // target en cada frame por si la toolbar cambia de alto a mitad
-        // del salto, y se reafirma el scroll durante una ventana corta
-        // para ganarle a cualquier momentum residual.
+        // de altura de la toolbar dinámica de Safari.
+        //
+        // Importante: UNA sola corrección en el frame siguiente, no una
+        // pelea prolongada contra el motor de scroll. Forzar scrollTo en
+        // cada rAF durante cientos de ms entra en conflicto con el
+        // rebote elástico nativo de iOS y es lo que producía la
+        // inestabilidad real de la página tras el skip.
         const jump = () => {
           const top = target.getBoundingClientRect().top + window.scrollY;
           window.scrollTo(0, top);
         };
 
-        const SETTLE_MS = 300;
-        const start = performance.now();
         jump();
-
-        const settle = (now: number) => {
-          jump();
-          if (now - start < SETTLE_MS) {
-            window.requestAnimationFrame(settle);
-          } else {
-            html.style.scrollBehavior = prevScrollBehavior;
-            skippingRef.current = false;
-          }
-        };
-        window.requestAnimationFrame(settle);
+        window.requestAnimationFrame(() => {
+          jump(); // corrige un posible desvío puntual (toolbar / resto de momentum)
+          html.style.scrollBehavior = prevScrollBehavior;
+          skippingRef.current = false;
+        });
       });
     });
   }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
