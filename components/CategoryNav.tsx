@@ -65,10 +65,10 @@ export function CategoryNav() {
                     track('select_category', { category_id: category.id });
                     scrollToSection(category.id);
                   }}
-                  className={`inline-flex min-h-[44px] items-center whitespace-nowrap rounded-pill px-4 text-[15px] font-bold no-underline transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none ${
+                  className={`inline-flex min-h-[44px] select-none items-center whitespace-nowrap rounded-pill px-4 text-[15px] font-bold no-underline transition-[transform,background-color,color] duration-150 ease-premium active:scale-[0.97] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none motion-reduce:active:scale-100 ${
                     isActive
-                      ? 'bg-gradient-to-b from-brand to-brand-ember text-brand-on'
-                      : 'text-ink-muted hover:bg-surface-hover hover:text-ink'
+                      ? 'bg-gradient-to-b from-brand to-brand-ember text-brand-on shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]'
+                      : 'text-ink-muted hover:bg-surface-hover hover:text-ink active:bg-surface-hover'
                   }`}
                 >
                   {category.name}

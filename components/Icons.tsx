@@ -65,6 +65,15 @@ export function PinIcon(props: IconProps) {
   );
 }
 
+export function BagIcon(props: IconProps) {
+  return (
+    <Stroke {...props}>
+      <path d="M6 8h12l-.8 11.2a1.8 1.8 0 0 1-1.8 1.8H8.6a1.8 1.8 0 0 1-1.8-1.8L6 8Z" />
+      <path d="M9 8V6.5a3 3 0 0 1 6 0V8" />
+    </Stroke>
+  );
+}
+
 export function MopedIcon(props: IconProps) {
   return (
     <Stroke {...props}>

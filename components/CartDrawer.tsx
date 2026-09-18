@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { Button } from '@/components/Button';
 import { CheckoutForm } from '@/components/CheckoutForm';
 import { CloseIcon } from '@/components/Icons';
+import { OrderTypeSelector } from '@/components/OrderTypeSelector';
 import { QuantityControl } from '@/components/QuantityControl';
 import { formatPrice, useCart } from '@/lib/cart';
 import { BUSINESS } from '@/lib/config';
@@ -15,8 +16,22 @@ const FOCUSABLE =
   'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
 
 export function CartDrawer() {
-  const { isOpen, closeCart, lines, count, subtotal, deliveryFee, total, add, decrease, remove, clear } =
-    useCart();
+  const {
+    isOpen,
+    closeCart,
+    lines,
+    count,
+    subtotal,
+    deliveryFee,
+    total,
+    orderType,
+    setOrderType,
+    add,
+    decrease,
+    remove,
+    clear,
+  } = useCart();
+  const isDelivery = orderType === 'delivery';
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const restoreRef = useRef<HTMLElement | null>(null);
@@ -114,11 +129,19 @@ export function CartDrawer() {
             type="button"
             onClick={closeCart}
             aria-label="Cerrar el pedido"
-            className="inline-flex h-11 w-11 items-center justify-center rounded-sm border border-line bg-surface text-ink transition-colors duration-150 hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none"
+            className="inline-flex h-11 w-11 items-center justify-center rounded-sm border border-line bg-surface text-ink shadow-[inset_0_1px_0_rgba(255,241,214,0.05)] transition-[transform,background-color,border-color] duration-150 ease-premium hover:border-line-strong hover:bg-surface-hover active:scale-[0.94] active:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none motion-reduce:active:scale-100"
           >
             <CloseIcon size={20} />
           </button>
         </header>
+
+        {/* Tipo de pedido: siempre visible bajo el título, fuera del área de scroll. */}
+        <div className="border-b border-line px-5 py-4">
+          <p className="mb-2 font-ui text-[12px] font-bold uppercase tracking-[0.12em] text-ink-muted">
+            Tipo de pedido
+          </p>
+          <OrderTypeSelector value={orderType} onChange={setOrderType} />
+        </div>
 
         <div className="flex-1 overflow-y-auto overscroll-contain px-5 py-5">
           {count === 0 ? (
@@ -171,8 +194,8 @@ export function CartDrawer() {
                   <span className="tabular-nums">{formatPrice(subtotal)}</span>
                 </div>
                 <div className="flex justify-between text-[15px] text-ink-muted">
-                  <span>Envío</span>
-                  <span className="tabular-nums">{formatPrice(deliveryFee)}</span>
+                  <span>{isDelivery ? 'Envío' : 'Para llevar'}</span>
+                  <span className="tabular-nums">{isDelivery ? formatPrice(deliveryFee) : 'Sin envío'}</span>
                 </div>
                 <div className="flex justify-between border-t border-line pt-2 font-ui text-lg font-extrabold text-ink-strong">
                   <span>Total</span>
@@ -184,17 +207,19 @@ export function CartDrawer() {
                 <Button variant="secondary" size="sm" href="#menu" onClick={closeAndGoToMenu}>
                   Seguir pidiendo
                 </Button>
-                <Button variant="ghost" size="sm" onClick={clear}>
+                <Button variant="danger" size="sm" onClick={clear}>
                   Vaciar carrito
                 </Button>
               </div>
 
               <div className="mt-6 border-t border-line pt-5">
                 <h3 className="font-display text-[22px] uppercase leading-6 text-ink">
-                  Datos de entrega
+                  {isDelivery ? 'Datos de entrega' : 'Tus datos'}
                 </h3>
                 <p className="mb-4 mt-1 text-[13px] leading-5 text-ink-muted">
-                  {BUSINESS.name} no cobra en línea. Solo necesitamos saber a dónde llevarlo.
+                  {isDelivery
+                    ? `${BUSINESS.name} no cobra en línea. Solo necesitamos saber a dónde llevarlo.`
+                    : `${BUSINESS.name} no cobra en línea. Te avisamos por WhatsApp cuando esté listo para recoger.`}
                 </p>
                 <CheckoutForm />
               </div>

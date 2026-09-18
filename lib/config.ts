@@ -24,6 +24,15 @@ export const BUSINESS = {
 export const SITE_URL = 'https://nataburgers.com';
 
 export const CART_STORAGE_KEY = 'nata-burgers:cart:v1';
+export const ORDER_TYPE_STORAGE_KEY = 'nata-burgers:order-type:v1';
+
+/** Opciones del selector "Tipo de pedido". La primera es la predeterminada. */
+export const ORDER_TYPES = [
+  { id: 'takeaway', label: 'Para llevar' },
+  { id: 'delivery', label: 'Delivery' },
+] as const;
+
+export const DEFAULT_ORDER_TYPE = ORDER_TYPES[0].id;
 
 /** Límites de los campos del formulario. El texto acaba en una URL. */
 export const FIELD_LIMITS = {

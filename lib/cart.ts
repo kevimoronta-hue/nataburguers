@@ -11,8 +11,14 @@ import {
   useState,
 } from 'react';
 import { PRODUCTS_BY_ID } from '@/data/menu';
-import { BUSINESS, CART_STORAGE_KEY } from '@/lib/config';
-import type { CartLine, CartLineDetailed } from '@/types';
+import {
+  BUSINESS,
+  CART_STORAGE_KEY,
+  DEFAULT_ORDER_TYPE,
+  ORDER_TYPES,
+  ORDER_TYPE_STORAGE_KEY,
+} from '@/lib/config';
+import type { CartLine, CartLineDetailed, OrderType } from '@/types';
 
 /* ------------------------------------------------------------------ */
 /* Formato de moneda — la única función que escribe pesos en el sitio. */
@@ -86,6 +92,10 @@ function parseStoredCart(raw: string | null): CartLine[] {
   }
 }
 
+function parseStoredOrderType(raw: string | null): OrderType {
+  return ORDER_TYPES.some((option) => option.id === raw) ? (raw as OrderType) : DEFAULT_ORDER_TYPE;
+}
+
 /* ------------------------------------------------------------------ */
 /* Contexts                                                            */
 /*                                                                     */
@@ -105,6 +115,9 @@ export interface CartData {
   isEmpty: boolean;
   /** false hasta que se ha leído localStorage, para no parpadear. */
   ready: boolean;
+  /** Para llevar / Delivery. El envío solo se cobra en delivery. */
+  orderType: OrderType;
+  setOrderType: (next: OrderType) => void;
   quantityOf: (id: string) => number;
   add: (id: string) => void;
   decrease: (id: string) => void;
@@ -135,17 +148,21 @@ export function useCartState(): CartState {
   const [ready, setReady] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
   const [lastAdded, setLastAdded] = useState<string | null>(null);
+  const [orderType, setOrderTypeState] = useState<OrderType>(DEFAULT_ORDER_TYPE);
   const hydrated = useRef(false);
 
   // Restaurar
   useEffect(() => {
-    let stored: string | null = null;
+    let storedCart: string | null = null;
+    let storedType: string | null = null;
     try {
-      stored = window.localStorage.getItem(CART_STORAGE_KEY);
+      storedCart = window.localStorage.getItem(CART_STORAGE_KEY);
+      storedType = window.localStorage.getItem(ORDER_TYPE_STORAGE_KEY);
     } catch {
-      stored = null;
+      /* almacenamiento bloqueado */
     }
-    dispatch({ type: 'hydrate', lines: parseStoredCart(stored) });
+    dispatch({ type: 'hydrate', lines: parseStoredCart(storedCart) });
+    setOrderTypeState(parseStoredOrderType(storedType));
     hydrated.current = true;
     setReady(true);
   }, []);
@@ -159,6 +176,15 @@ export function useCartState(): CartState {
       /* modo privado o almacenamiento bloqueado: el pedido sigue funcionando en memoria */
     }
   }, [lines]);
+
+  useEffect(() => {
+    if (!hydrated.current) return;
+    try {
+      window.localStorage.setItem(ORDER_TYPE_STORAGE_KEY, orderType);
+    } catch {
+      /* idem */
+    }
+  }, [orderType]);
 
   const detailed = useMemo<CartLineDetailed[]>(
     () =>
@@ -178,7 +204,9 @@ export function useCartState(): CartState {
     () => detailed.reduce((sum, line) => sum + line.lineTotal, 0),
     [detailed],
   );
-  const deliveryFee = count > 0 ? BUSINESS.deliveryFee : 0;
+  const deliveryFee = count > 0 && orderType === 'delivery' ? BUSINESS.deliveryFee : 0;
+
+  const setOrderType = useCallback((next: OrderType) => setOrderTypeState(next), []);
 
   const quantityOf = useCallback(
     (id: string) => lines.find((line) => line.id === id)?.quantity ?? 0,
@@ -205,6 +233,8 @@ export function useCartState(): CartState {
       total: subtotal + deliveryFee,
       isEmpty: count === 0,
       ready,
+      orderType,
+      setOrderType,
       quantityOf,
       add,
       decrease,
@@ -212,7 +242,21 @@ export function useCartState(): CartState {
       clear,
       lastAdded,
     }),
-    [detailed, count, subtotal, deliveryFee, ready, quantityOf, add, decrease, remove, clear, lastAdded],
+    [
+      detailed,
+      count,
+      subtotal,
+      deliveryFee,
+      ready,
+      orderType,
+      setOrderType,
+      quantityOf,
+      add,
+      decrease,
+      remove,
+      clear,
+      lastAdded,
+    ],
   );
 
   const ui = useMemo<CartUi>(() => ({ isOpen, openCart, closeCart }), [isOpen, openCart, closeCart]);

@@ -27,11 +27,12 @@ export function CheckoutForm() {
   const [copied, setCopied] = useState(false);
   const firstErrorRef = useRef<string | null>(null);
 
-  const { lines, subtotal, deliveryFee, total, count } = useCartData();
+  const { lines, subtotal, deliveryFee, total, count, orderType } = useCartData();
+  const isDelivery = orderType === 'delivery';
 
   const payload = useMemo(
-    () => ({ lines, subtotal, deliveryFee, total, customer }),
-    [lines, subtotal, deliveryFee, total, customer],
+    () => ({ lines, subtotal, deliveryFee, total, orderType, customer }),
+    [lines, subtotal, deliveryFee, total, orderType, customer],
   );
 
   const message = useMemo(() => buildOrderMessage(payload), [payload]);
@@ -48,7 +49,7 @@ export function CheckoutForm() {
 
   function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const found = validateCustomer(customer);
+    const found = validateCustomer(customer, orderType);
     setErrors(found);
 
     const firstError = (['nombre', 'telefono', 'direccion'] as const).find((key) => found[key]);
@@ -103,27 +104,34 @@ export function CheckoutForm() {
           required
           error={errors.telefono}
         />
-        <FormField
-          id="direccion"
-          label="Dirección de entrega"
-          multiline
-          value={customer.direccion}
-          onChange={(value) => update('direccion', value)}
-          placeholder="Calle, número y sector"
-          maxLength={FIELD_LIMITS.direccion}
-          required
-          error={errors.direccion}
-          hint="Mientras más clara, más rápido llega el pedido."
-        />
-        <FormField
-          id="referencia"
-          label="Referencia"
-          optional
-          value={customer.referencia}
-          onChange={(value) => update('referencia', value)}
-          placeholder="Casa azul, frente al colmado."
-          maxLength={FIELD_LIMITS.referencia}
-        />
+        {/* Dirección y referencia solo tienen sentido en delivery. En "Para
+            llevar" no se piden ni se validan; el valor escrito se conserva
+            por si la persona cambia de opinión. */}
+        {isDelivery ? (
+          <>
+            <FormField
+              id="direccion"
+              label="Dirección de entrega"
+              multiline
+              value={customer.direccion}
+              onChange={(value) => update('direccion', value)}
+              placeholder="Calle, número y sector"
+              maxLength={FIELD_LIMITS.direccion}
+              required
+              error={errors.direccion}
+              hint="Mientras más clara, más rápido llega el pedido."
+            />
+            <FormField
+              id="referencia"
+              label="Referencia"
+              optional
+              value={customer.referencia}
+              onChange={(value) => update('referencia', value)}
+              placeholder="Casa azul, frente al colmado."
+              maxLength={FIELD_LIMITS.referencia}
+            />
+          </>
+        ) : null}
         <FormField
           id="nota"
           label="Nota para el pedido"
@@ -141,7 +149,7 @@ export function CheckoutForm() {
       <div className="flex flex-col gap-3">
         <button
           type="submit"
-          className="inline-flex min-h-[54px] items-center justify-center gap-2 rounded-md bg-whatsapp px-6 font-ui text-base font-extrabold text-whatsapp-on transition-[filter] duration-150 hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none"
+          className="inline-flex min-h-[54px] select-none items-center justify-center gap-2 rounded-md border border-[rgba(255,255,255,0.12)] bg-whatsapp px-6 font-ui text-base font-extrabold text-whatsapp-on shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_1px_2px_rgba(0,0,0,0.45),0_8px_22px_rgba(37,211,102,0.22)] transition-[transform,filter,box-shadow] duration-150 ease-premium hover:brightness-110 active:scale-[0.97] active:shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_1px_2px_rgba(0,0,0,0.45)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none motion-reduce:active:scale-100"
         >
           <WhatsAppIcon size={22} />
           Enviar pedido por WhatsApp

@@ -34,6 +34,9 @@ export interface CartLineDetailed extends CartLine {
   lineTotal: number;
 }
 
+/** Cómo se entrega el pedido. Base para zonas, costes e instrucciones de envío futuras. */
+export type OrderType = 'takeaway' | 'delivery';
+
 export interface CustomerDetails {
   nombre: string;
   telefono: string;

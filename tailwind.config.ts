@@ -6,8 +6,15 @@ import type { Config } from 'tailwindcss';
  */
 const config: Config = {
   content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}'],
+  // `hover:` solo en dispositivos con puntero (@media (hover: hover)):
+  // en táctil el estado hover se quedaría "pegado" tras el tap.
+  future: { hoverOnlyWhenSupported: true },
   theme: {
     extend: {
+      transitionTimingFunction: {
+        /** Salida rápida, asentamiento suave; sin rebote. */
+        premium: 'cubic-bezier(0.23, 1, 0.32, 1)',
+      },
       colors: {
         bg: {
           base: '#080706',

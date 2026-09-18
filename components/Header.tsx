@@ -66,7 +66,7 @@ export function Header() {
       style={{ top: 'env(safe-area-inset-top, 0px)' }}
     >
       <div
-        className={`relative mx-auto flex max-w-shell items-center gap-4 rounded-xl border border-line-brand bg-[rgba(8,7,6,0.84)] pl-4 pr-2 shadow-nav backdrop-blur-[14px] transition-[padding] duration-200 motion-reduce:transition-none ${
+        className={`relative mx-auto flex max-w-shell items-center gap-4 rounded-xl border border-line-brand bg-[rgba(8,7,6,0.84)] pl-4 pr-2 shadow-[inset_0_1px_0_rgba(255,241,214,0.07),0_1px_0_rgba(0,0,0,0.6),0_10px_30px_rgba(0,0,0,0.55)] backdrop-blur-[14px] transition-[padding] duration-200 ease-premium motion-reduce:transition-none ${
           compact ? 'py-1' : 'py-2'
         }`}
       >
@@ -76,7 +76,7 @@ export function Header() {
           href="#inicio"
           onClick={(event) => onSectionLink(event, 'inicio')}
           aria-label="Nata Burger's, inicio"
-          className="absolute left-1/2 top-1/2 inline-flex shrink-0 -translate-x-1/2 -translate-y-1/2 rounded-[4px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright md:static md:left-auto md:top-auto md:translate-x-0 md:translate-y-0"
+          className="absolute left-1/2 top-1/2 inline-flex shrink-0 -translate-x-1/2 -translate-y-1/2 rounded-[4px] transition-opacity duration-150 ease-premium active:opacity-70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none md:static md:left-auto md:top-auto md:translate-x-0 md:translate-y-0"
         >
           <Image
             src="/nata-burgers-logo.png"
@@ -119,11 +119,13 @@ export function Header() {
             type="button"
             onClick={handleOpenCart}
             aria-label={count > 0 ? `Ver el pedido, ${count} artículos` : 'Ver el pedido, vacío'}
-            className="relative inline-flex h-11 w-11 items-center justify-center rounded-sm border border-line bg-surface text-ink transition-colors duration-150 hover:border-line-strong hover:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none"
+            className={`relative inline-flex h-11 w-11 select-none items-center justify-center rounded-sm border bg-surface text-ink shadow-[inset_0_1px_0_rgba(255,241,214,0.06),0_1px_2px_rgba(0,0,0,0.35)] transition-[transform,background-color,border-color] duration-150 ease-premium hover:border-line-strong hover:bg-surface-hover active:scale-[0.94] active:bg-surface-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none motion-reduce:active:scale-100 ${
+              count > 0 ? 'border-line-brand' : 'border-line'
+            }`}
           >
             <CartIcon size={20} />
             {count > 0 ? (
-              <span className="absolute -right-1.5 -top-1.5 min-w-5 rounded-pill bg-brand px-[5px] text-center text-xs font-extrabold leading-5 text-brand-on">
+              <span className="absolute -right-1.5 -top-1.5 min-w-5 rounded-pill bg-brand px-[5px] text-center text-xs font-extrabold leading-5 text-brand-on shadow-[0_0_0_2px_rgba(8,7,6,0.95)]">
                 {count}
               </span>
             ) : null}
