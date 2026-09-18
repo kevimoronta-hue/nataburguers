@@ -2,6 +2,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
 
 /**
  * Intro por secuencia de frames pilotada por scroll — EXCLUSIVA de mobile
@@ -378,17 +379,24 @@ function MobileFrameSequence() {
 
   useEffect(() => {
     if (phase === 'ready') return;
-    const { body } = document;
-    const prev = { overflow: body.style.overflow, position: body.style.position, width: body.style.width };
-    body.style.overflow = 'hidden';
-    body.style.position = 'fixed';
-    body.style.width = '100%';
-    return () => {
-      body.style.overflow = prev.overflow;
-      body.style.position = prev.position;
-      body.style.width = prev.width;
-    };
+    lockScroll();
+    return unlockScroll;
   }, [phase]);
+
+  // --- Restauración de scroll del navegador: desactivada en mobile --------
+  // Con 'auto', al recargar Safari reaplica la posición guardada en cada
+  // layout hasta que el usuario toca; con la intro delante eso puede pisar
+  // el aterrizaje (natural o del skip). La página se abre siempre en la
+  // intro; no hay posición que restaurar.
+
+  useEffect(() => {
+    if (!('scrollRestoration' in window.history)) return;
+    const prev = window.history.scrollRestoration;
+    window.history.scrollRestoration = 'manual';
+    return () => {
+      window.history.scrollRestoration = prev;
+    };
+  }, []);
 
   // --- Render loop: un listener de scroll → un rAF → render ---------------
 
@@ -428,7 +436,8 @@ function MobileFrameSequence() {
    *     y el ancla tiene su posición definitiva;
    *  4. esperar a que las imágenes críticas del destino estén decodificadas
    *     (promesa real; instantánea si siguen en memoria);
-   *  5. scrollTo por pixel al ancla, calculado en ese momento, sin smooth;
+   *  5. `scrollToSection('inicio')`: el mismo helper que usan todos los
+   *     enlaces internos del sitio (instantáneo en mobile, sin hash);
    *  6. soltar el candado y dejar que `render()` refleje la nueva posición.
    */
   const handleSkip = useCallback(() => {
@@ -441,13 +450,7 @@ function MobileFrameSequence() {
     window.requestAnimationFrame(() => {
       decodePostIntroCriticalImages()
         .then(() => {
-          const target = document.getElementById(POST_INTRO_TARGET_ID);
-          if (!target) return;
-          const html = document.documentElement;
-          const prevScrollBehavior = html.style.scrollBehavior;
-          html.style.scrollBehavior = 'auto'; // no recorrer la intro con smooth
-          window.scrollTo(0, target.getBoundingClientRect().top + window.scrollY);
-          html.style.scrollBehavior = prevScrollBehavior;
+          scrollToSection(POST_INTRO_TARGET_ID);
         })
         .finally(() => {
           skipInFlightRef.current = false;

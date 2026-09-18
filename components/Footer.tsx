@@ -1,5 +1,13 @@
+'use client';
+
 import Image from 'next/image';
 import { BUSINESS } from '@/lib/config';
+import { scrollToSection } from '@/lib/scroll';
+
+function onSectionLink(event: React.MouseEvent<HTMLAnchorElement>, id: string) {
+  event.preventDefault();
+  scrollToSection(id);
+}
 
 export function Footer() {
   return (
@@ -25,10 +33,18 @@ export function Footer() {
           aria-label="Navegación del pie"
           className="footer-nav-mobile flex flex-col gap-2"
         >
-          <a href="#inicio" className="text-[15px] text-ink-muted no-underline hover:text-ink">
+          <a
+            href="#inicio"
+            onClick={(event) => onSectionLink(event, 'inicio')}
+            className="text-[15px] text-ink-muted no-underline hover:text-ink"
+          >
             Inicio
           </a>
-          <a href="#menu" className="text-[15px] text-ink-muted no-underline hover:text-ink">
+          <a
+            href="#menu"
+            onClick={(event) => onSectionLink(event, 'menu')}
+            className="text-[15px] text-ink-muted no-underline hover:text-ink"
+          >
             Menú
           </a>
           <a

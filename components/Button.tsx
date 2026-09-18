@@ -1,5 +1,8 @@
+'use client';
+
 import Link from 'next/link';
-import type { AnchorHTMLAttributes, ButtonHTMLAttributes, ReactNode } from 'react';
+import type { AnchorHTMLAttributes, ButtonHTMLAttributes, MouseEvent, ReactNode } from 'react';
+import { scrollToSection } from '@/lib/scroll';
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'whatsapp';
 type Size = 'sm' | 'md' | 'lg';
@@ -53,6 +56,24 @@ export function Button(props: ButtonProps | LinkProps) {
     if (external) {
       return (
         <a className={cls} href={href} {...anchorRest}>
+          {icon}
+          <span>{children}</span>
+        </a>
+      );
+    }
+    // Ancla interna: navegación programática (ver lib/scroll.ts), nunca
+    // hash en la URL ni next/link. El onClick del consumidor corre primero
+    // y puede hacer preventDefault para encargarse él mismo del salto.
+    if (href.startsWith('#')) {
+      const { onClick, ...linkRest } = anchorRest;
+      const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+        onClick?.(event);
+        if (event.defaultPrevented) return;
+        event.preventDefault();
+        scrollToSection(href.slice(1));
+      };
+      return (
+        <a className={cls} href={href} onClick={handleClick} {...linkRest}>
           {icon}
           <span>{children}</span>
         </a>

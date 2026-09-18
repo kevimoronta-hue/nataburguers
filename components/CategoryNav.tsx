@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { CATEGORIES } from '@/data/menu';
 import { track } from '@/lib/analytics';
+import { scrollToSection } from '@/lib/scroll';
 
 export function CategoryNav() {
   const [active, setActive] = useState<string>(CATEGORIES[0].id);
@@ -59,7 +60,11 @@ export function CategoryNav() {
                   data-category={category.id}
                   href={`#${category.id}`}
                   aria-current={isActive ? 'true' : undefined}
-                  onClick={() => track('select_category', { category_id: category.id })}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    track('select_category', { category_id: category.id });
+                    scrollToSection(category.id);
+                  }}
                   className={`inline-flex min-h-[44px] items-center whitespace-nowrap rounded-pill px-4 text-[15px] font-bold no-underline transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none ${
                     isActive
                       ? 'bg-gradient-to-b from-brand to-brand-ember text-brand-on'

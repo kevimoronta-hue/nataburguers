@@ -9,6 +9,7 @@ import { QuantityControl } from '@/components/QuantityControl';
 import { formatPrice, useCart } from '@/lib/cart';
 import { BUSINESS } from '@/lib/config';
 import { track } from '@/lib/analytics';
+import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])';
@@ -50,18 +51,37 @@ export function CartDrawer() {
   useEffect(() => {
     if (!isOpen) return;
     restoreRef.current = document.activeElement as HTMLElement | null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    lockScroll(); // mismo bloqueo que el loader de la intro (ver lib/scroll.ts)
     document.addEventListener('keydown', onKeyDown);
     closeRef.current?.focus();
     if (count > 0) track('begin_order', { item_count: count, value: total });
     return () => {
-      document.body.style.overflow = previousOverflow;
       document.removeEventListener('keydown', onKeyDown);
-      restoreRef.current?.focus?.();
+      unlockScroll(); // restaura la posición exacta previa, sin smooth
+      // Devolver el foco solo a un elemento que siga en el documento: en
+      // iOS el opener suele ser <body> o la CartBar ya desmontada, y un
+      // focus() sobre ellos no debe mover nada.
+      const opener = restoreRef.current;
+      if (opener && opener !== document.body && opener.isConnected) opener.focus();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, onKeyDown]);
+
+  /**
+   * "Ver el menú" / "Seguir pidiendo": cerrar y DESPUÉS navegar. El cierre
+   * desmonta el drawer y suelta el bloqueo del body en el mismo evento
+   * (React vacía los efectos de un evento discreto de forma síncrona); el
+   * salto al menú se hace en el siguiente frame, cuando la página ya
+   * vuelve a poder desplazarse. Nunca por hash ni por next/link.
+   */
+  const closeAndGoToMenu = useCallback(
+    (event: React.MouseEvent<HTMLAnchorElement>) => {
+      event.preventDefault();
+      closeCart();
+      window.requestAnimationFrame(() => scrollToSection('menu'));
+    },
+    [closeCart],
+  );
 
   if (!isOpen) return null;
 
@@ -107,7 +127,7 @@ export function CartDrawer() {
               <p className="text-[15px] leading-[23px] text-ink-muted">
                 Agrega algo rico del menú para comenzar.
               </p>
-              <Button variant="primary" size="md" href="#menu" onClick={closeCart}>
+              <Button variant="primary" size="md" href="#menu" onClick={closeAndGoToMenu}>
                 Ver el menú
               </Button>
             </div>
@@ -161,7 +181,7 @@ export function CartDrawer() {
               </div>
 
               <div className="mt-3 flex flex-wrap gap-3">
-                <Button variant="secondary" size="sm" href="#menu" onClick={closeCart}>
+                <Button variant="secondary" size="sm" href="#menu" onClick={closeAndGoToMenu}>
                   Seguir pidiendo
                 </Button>
                 <Button variant="ghost" size="sm" onClick={clear}>

@@ -7,6 +7,13 @@ import { CartIcon } from '@/components/Icons';
 import { useCart } from '@/lib/cart';
 import { BUSINESS } from '@/lib/config';
 import { track } from '@/lib/analytics';
+import { scrollToSection } from '@/lib/scroll';
+
+/** Ancla interna sin hash en la URL ni smooth en mobile (ver lib/scroll.ts). */
+function onSectionLink(event: React.MouseEvent<HTMLAnchorElement>, id: string) {
+  event.preventDefault();
+  scrollToSection(id);
+}
 
 const LINKS = [
   { href: '#inicio', label: 'Inicio' },
@@ -67,6 +74,7 @@ export function Header() {
             real de la barra, no al espacio libre entre los demás elementos. */}
         <a
           href="#inicio"
+          onClick={(event) => onSectionLink(event, 'inicio')}
           aria-label="Nata Burger's, inicio"
           className="absolute left-1/2 top-1/2 inline-flex shrink-0 -translate-x-1/2 -translate-y-1/2 rounded-[4px] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright md:static md:left-auto md:top-auto md:translate-x-0 md:translate-y-0"
         >
@@ -89,7 +97,9 @@ export function Header() {
               <a
                 key={link.href}
                 href={link.href}
-                {...(link.external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+                {...(link.external
+                  ? { target: '_blank', rel: 'noopener noreferrer' }
+                  : { onClick: (event: React.MouseEvent<HTMLAnchorElement>) => onSectionLink(event, link.href.slice(1)) })}
                 aria-current={isActive ? 'true' : undefined}
                 className={`relative inline-flex min-h-[44px] items-center rounded-sm px-3 text-[15px] font-bold no-underline transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-bright motion-reduce:transition-none ${
                   isActive ? 'text-ink' : 'text-ink-muted hover:text-ink'
