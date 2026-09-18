@@ -34,14 +34,19 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  *     en bruto (~1,1 GB si nada los liberase nunca).
  *  4. Anclaje: sticky + 100dvh (absorbe la barra dinámica de Safari a
  *     nivel CSS) dentro de un spacer de altura fija en vh — sin JS para
- *     el posicionamiento en sí. El contenido (main/footer) vive en el
- *     flujo desde el primer render, justo debajo: la geometría del
- *     documento nunca cambia durante ni al terminar la intro.
- *  5. Responsabilidades: `tick()` es el ÚNICO autor del estado visual
- *     (frame, badge, navbar, barra del pedido). "Saltar intro" solo
- *     navega (un scrollTo instantáneo al ancla post-intro) y deja que el
- *     tick refleje la nueva posición. Un solo camino para todas las
- *     plataformas.
+ *     el posicionamiento en sí.
+ *  5. Contenido post-intro (main/footer/cartbar): `display:none` SOLO
+ *     hasta la primera vez que se completa la intro (scroll natural o
+ *     "Saltar intro"). Se revela UNA vez y no se vuelve a ocultar: la
+ *     geometría cambia una sola vez por visita, nunca en un rewind ni
+ *     dentro del hot path del scroll. Durante el primer pase la secuencia
+ *     tiene toda la memoria/GPU para ella (sin hero, sin brasas, sin blur).
+ *  6. Responsabilidades: `tick()` es el ÚNICO autor del estado visual
+ *     (frame, badge, navbar). "Saltar intro" solo navega: revela (si hace
+ *     falta), espera a que las imágenes críticas del destino estén
+ *     DECODIFICADAS (promesa real, no un timeout) y hace un scrollTo
+ *     directo al ancla del Hero. Después el tick refleja la nueva
+ *     posición. Un solo camino para todas las plataformas.
  */
 
 const MOBILE_QUERY = '(max-width: 767px)';
@@ -49,6 +54,19 @@ const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
 /** Ancla post-intro: la sección Hero ("Tu antojo empieza aquí"). */
 const POST_INTRO_TARGET_ID = 'inicio';
+
+/**
+ * Imágenes visibles nada más aterrizar tras el skip (viewport de móvil):
+ * el logo del header y el burger del Hero. Nada más: las tarjetas del
+ * menú quedan por debajo del fold y siguen su lazy-loading normal.
+ * Ambas ya se descargan al cargar la página (next/image `priority` →
+ * <link rel=preload>), pero Safari las pinta con `decoding="async"`: tras
+ * un salto instantáneo aparecen vacías hasta que termina el decode. Por
+ * eso se decodifican explícitamente durante el loader y se vuelve a
+ * esperar su decode justo antes de saltar (instantáneo si siguen en
+ * memoria; si Safari purgó el bitmap, se espera lo justo, no un timeout).
+ */
+const POST_INTRO_CRITICAL_IMAGES = '.site-header img, #inicio img';
 
 export function MobileFrameSequenceIntro() {
   const [isMobile, setIsMobile] = useState(false);
@@ -76,9 +94,8 @@ const TOTAL_FRAMES = 193;
 const LAST_INDEX = TOTAL_FRAMES - 1;
 const SCROLL_VH = 450;
 
-// Muestra la barra del pedido (fixed) al terminar la intro. Independiente de la navbar.
+// Progreso a partir del cual se revela (una sola vez) el contenido post-intro.
 const CONTENT_REVEAL_ON = 0.985;
-const CONTENT_REVEAL_OFF = 0.965;
 
 // La navbar aparece sobre las últimas frames (168 → 184, 1-based).
 const NAVBAR_START_INDEX = 167;
@@ -139,6 +156,23 @@ function decodeFrame(url: string): Promise<HTMLImageElement | null> {
   });
 }
 
+/** Resuelve cuando la imagen está cargada Y decodificada. Nunca rechaza. */
+function whenImageDecoded(img: HTMLImageElement): Promise<void> {
+  const decode = () =>
+    typeof img.decode === 'function' ? img.decode().catch(() => undefined) : Promise.resolve();
+  if (img.complete) return decode();
+  return new Promise<void>((resolve) => {
+    img.addEventListener('load', () => decode().then(resolve), { once: true });
+    img.addEventListener('error', () => resolve(), { once: true });
+  });
+}
+
+/** Decode de las imágenes críticas del destino post-intro (ver POST_INTRO_CRITICAL_IMAGES). */
+function decodePostIntroCriticalImages(): Promise<void> {
+  const imgs = Array.from(document.querySelectorAll<HTMLImageElement>(POST_INTRO_CRITICAL_IMAGES));
+  return Promise.all(imgs.map(whenImageDecoded)).then(() => undefined);
+}
+
 function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, img: HTMLImageElement | null) {
   const cw = canvas.width;
   const ch = canvas.height;
@@ -197,7 +231,9 @@ function MobileFrameSequence() {
   const lastGoodIndexRef = useRef(0);
 
   const skippingRef = useRef(false);
-  const doneRef = useRef(false);
+  // Contenido post-intro revelado (one-way). NO significa "secuencia
+  // terminada": la secuencia sigue siendo 100 % reversible por scroll.
+  const revealedRef = useRef(false);
   // Último índice aplicado a badge/navbar: evita reescribir estilos en
   // cada evento de scroll cuando la frame no ha cambiado (p. ej. mientras
   // se navega por el menú, ya fuera de la intro).
@@ -212,11 +248,19 @@ function MobileFrameSequence() {
     fontsReady: false,
     canvasReady: false,
     appHydrated: false,
+    postIntroReady: false, // imágenes críticas del destino del skip decodificadas
   });
 
   const checkReady = useCallback(() => {
     const r = readinessRef.current;
-    if (r.allFramesReady && r.logoReady && r.fontsReady && r.canvasReady && r.appHydrated) {
+    if (
+      r.allFramesReady &&
+      r.logoReady &&
+      r.fontsReady &&
+      r.canvasReady &&
+      r.appHydrated &&
+      r.postIntroReady
+    ) {
       setIsExperienceReady(true);
     }
   }, []);
@@ -271,6 +315,21 @@ function MobileFrameSequence() {
     img.onload = settle;
     img.onerror = settle; // no bloquear indefinidamente por un logo que nunca llega
     img.src = '/nata-burgers-logo.png';
+  }, [checkReady]);
+
+  // Destino del skip caliente desde el loader: el header y el hero ya
+  // están en el DOM (display:none, pero sus <img> son eager y se
+  // descargan igualmente), así que se pueden decodificar ahora.
+  useEffect(() => {
+    let cancelled = false;
+    decodePostIntroCriticalImages().then(() => {
+      if (cancelled) return;
+      readinessRef.current.postIntroReady = true;
+      checkReady();
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [checkReady]);
 
   useEffect(() => {
@@ -392,11 +451,15 @@ function MobileFrameSequence() {
     };
   }, [reducedMotion, isExperienceReady]);
 
-  /** Muestra/oculta la barra del pedido (fixed). main/footer nunca se tocan. */
-  const setContentRevealed = useCallback((done: boolean) => {
-    if (doneRef.current === done) return;
-    doneRef.current = done;
-    document.documentElement.classList.toggle('nb-intro-done', done);
+  /**
+   * Revela main/footer/cartbar. One-way: una vez revelado no se vuelve a
+   * ocultar (ni en rewind), así el layout completo de la página ocurre
+   * exactamente una vez por visita. No toca la secuencia ni el canvas.
+   */
+  const revealContent = useCallback(() => {
+    if (revealedRef.current) return;
+    revealedRef.current = true;
+    document.documentElement.classList.add('nb-content-revealed');
   }, []);
 
   /**
@@ -487,8 +550,9 @@ function MobileFrameSequence() {
         updateNavbar(frameIndex);
       }
 
-      if (progress >= CONTENT_REVEAL_ON) setContentRevealed(true);
-      else if (progress < CONTENT_REVEAL_OFF) setContentRevealed(false);
+      // Revelado one-way al llegar al final por scroll natural. Nunca se
+      // vuelve a ocultar: un rewind solo mueve frames, jamás el layout.
+      if (progress >= CONTENT_REVEAL_ON) revealContent();
     }
 
     function onScroll() {
@@ -505,7 +569,7 @@ function MobileFrameSequence() {
       window.removeEventListener('scroll', onScroll);
       if (rafId) window.cancelAnimationFrame(rafId);
     };
-  }, [reducedMotionReady, reducedMotion, isExperienceReady, getCtx, updateBadge, updateNavbar, setContentRevealed]);
+  }, [reducedMotionReady, reducedMotion, isExperienceReady, getCtx, updateBadge, updateNavbar, revealContent]);
 
   // --- Resize / orientación ---
   // 100dvh ya absorbe la barra dinámica de Safari a nivel CSS. Aquí solo
@@ -556,13 +620,13 @@ function MobileFrameSequence() {
     const timer = window.setTimeout(() => {
       if (cancelled) return;
       updateNavbar(LAST_INDEX);
-      setContentRevealed(true);
+      revealContent();
     }, 550);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [reducedMotionReady, reducedMotion, updateNavbar, setContentRevealed]);
+  }, [reducedMotionReady, reducedMotion, updateNavbar, revealContent]);
 
   // --- Limpieza al desmontar ---
 
@@ -574,14 +638,21 @@ function MobileFrameSequence() {
 
   /**
    * "Saltar intro" NAVEGA, nada más: no pinta frames, no toca la navbar,
-   * no revela contenido. Un único camino para todas las plataformas.
-   * El destino es el ancla real del Hero ("Tu antojo empieza aquí"), que
-   * ya está en el flujo del documento: el scrollTo es exacto por
-   * construcción, sin verificación ni reintentos. Tras el salto, `tick()`
-   * lee la nueva posición y aplica el estado visual que le corresponde.
+   * no fuerza ningún estado de la secuencia. Un único camino, todas las
+   * plataformas, siempre el mismo destino: el ancla del Hero ("Tu antojo
+   * empieza aquí"), sea cual sea la frame, la dirección o el historial.
+   *
+   *  1. candado breve (reentrada) + quitar el foco del botón;
+   *  2. revelar el contenido si es la primera vez (one-way);
+   *  3. siguiente frame → el layout del contenido revelado ya está
+   *     asentado y el ancla tiene su posición definitiva;
+   *  4. esperar a que las imágenes críticas del destino estén
+   *     decodificadas (promesa real; instantánea si ya lo están);
+   *  5. scrollTo directo por pixel, sin smooth, sin verificación;
+   *  6. soltar el candado y pedir al tick que refleje la nueva posición.
    */
   const handleSkip = useCallback(() => {
-    if (skippingRef.current) return; // candado breve contra reentrada
+    if (skippingRef.current) return;
     skippingRef.current = true;
 
     // Un <button> que sigue enfocado puede hacer que iOS intente
@@ -589,17 +660,25 @@ function MobileFrameSequence() {
     // dedo: se le quita el foco antes de mover nada.
     (document.activeElement as HTMLElement | null)?.blur?.();
 
-    const target = document.getElementById(POST_INTRO_TARGET_ID);
-    if (target) {
-      const top = target.getBoundingClientRect().top + window.scrollY;
-      // 'instant' ignora el scroll-behavior: smooth del <html>: no recorre
-      // la intro visualmente. Salto directo por pixel, nunca scrollIntoView.
-      window.scrollTo({ top, behavior: 'instant' });
-    }
+    revealContent();
 
-    skippingRef.current = false;
-    requestTickRef.current();
-  }, []);
+    window.requestAnimationFrame(() => {
+      decodePostIntroCriticalImages()
+        .then(() => {
+          const target = document.getElementById(POST_INTRO_TARGET_ID);
+          if (!target) return;
+          const html = document.documentElement;
+          const prevScrollBehavior = html.style.scrollBehavior;
+          html.style.scrollBehavior = 'auto'; // no recorrer la intro con smooth
+          window.scrollTo(0, target.getBoundingClientRect().top + window.scrollY);
+          html.style.scrollBehavior = prevScrollBehavior;
+        })
+        .finally(() => {
+          skippingRef.current = false;
+          requestTickRef.current();
+        });
+    });
+  }, [revealContent]);
 
   // ---------------------------------------------------------------------
   // Render

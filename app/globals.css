@@ -56,8 +56,8 @@
  *
  * La visibilidad inicial se decide con un @media puro (sin JS, sin clase
  * en <html>) para que no haya parpadeo en ningún sentido y cero riesgo de
- * hydration mismatch en el nodo raíz. `nb-intro-done` la añade React ya
- * montado (efecto, no render), así que nunca choca con el HTML del server.
+ * hydration mismatch en el nodo raíz. `nb-content-revealed` la añade React
+ * ya montado (efecto, no render), así que nunca choca con el HTML del server.
  */
 .nb-intro-overlay {
   display: none;
@@ -81,23 +81,28 @@
     display: block;
   }
 
-  html.nb-intro-done .nb-intro-overlay--static {
+  html.nb-content-revealed .nb-intro-overlay--static {
     display: none;
   }
 
   /*
-   * main y footer NUNCA se ocultan: viven en el flujo desde el primer
-   * render, 450vh más abajo, tapados por el sticky de la intro. Así la
-   * geometría del documento es estable y el salto de "Saltar intro" es un
-   * scrollTo exacto. Solo la barra del pedido (fixed, fuera del flujo) se
-   * oculta mientras se está dentro de la intro.
+   * Contenido post-intro (main/footer/barra del pedido): oculto SOLO hasta
+   * la PRIMERA vez que se completa la intro en esta visita, sea por scroll
+   * natural o por "Saltar intro". `nb-content-revealed` se añade una vez
+   * y no se quita nunca: la geometría del documento cambia exactamente
+   * una vez, jamás durante un rewind ni en el hot path del scroll.
+   * Mientras no está revelado, el hero, sus animaciones de entrada y sus
+   * capas (blur, brasas) no existen para el compositor: la secuencia
+   * dispone de toda la memoria/GPU durante el primer pase.
    */
-  html:not(.nb-intro-done) .site-cartbar {
+  html:not(.nb-content-revealed) .site-main,
+  html:not(.nb-content-revealed) .site-footer,
+  html:not(.nb-content-revealed) .site-cartbar {
     display: none;
   }
 
   /*
-   * La navbar ya NO depende de `nb-intro-done`: aparece progresivamente
+   * La navbar NO depende de `nb-content-revealed`: aparece progresivamente
    * sobre las últimas frames (168→184), mientras el canvas sigue visible.
    * MobileFrameSequenceIntro controla opacity/transform/filter por style
    * inline, frame a frame, sin transición CSS (cero retraso respecto al
@@ -137,6 +142,8 @@
   width: 100%;
   overflow: hidden;
   background: #080706;
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
 }
 
 .nb-intro-canvas {

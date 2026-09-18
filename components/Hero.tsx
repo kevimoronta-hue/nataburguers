@@ -34,7 +34,14 @@ export function Hero() {
       const el = ref.current;
       if (!el) return;
       const height = el.offsetHeight || 1;
-      setProgress(Math.min(Math.max(window.scrollY / height, 0), 1));
+      // Progreso = cuánto ha salido el hero por arriba del viewport.
+      // En desktop el hero es el primer bloque del documento, así que
+      // -rect.top === window.scrollY (resultado idéntico al de antes). En
+      // mobile, con la intro de 450vh delante, esto evita que el hero se
+      // dé por "asentado" desde el primer pixel de scroll y evita renders
+      // por frame mientras aún está fuera de pantalla (progress se queda en 0).
+      const top = el.getBoundingClientRect().top;
+      setProgress(Math.min(Math.max(-top / height, 0), 1));
     }
     function onScroll() {
       if (frame) return;
