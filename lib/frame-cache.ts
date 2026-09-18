@@ -15,8 +15,10 @@
  * no se puede cancelar: al resolver, si ya no cabe en la ventana, se
  * cierra en el acto.
  *
- * Mismo motor en todas las plataformas: `createImageBitmap(blob)` con
- * fallback a `<img>` + `decode()` si el navegador no lo soporta.
+ * Primitiva de decode: `<img>` + `decode()` (la de la versión histórica
+ * que funcionaba en iOS): WebKit decodifica en un hilo aparte y el bitmap
+ * es purgable. `createImageBitmap` queda solo como fallback: en WebKit
+ * decodifica en el hilo principal y su memoria no es purgable.
  */
 
 export type FrameSource = ImageBitmap | HTMLImageElement;
@@ -55,18 +57,18 @@ function decodeViaImage(url: string): Promise<HTMLImageElement> {
 }
 
 async function decodeFrame(url: string): Promise<FrameSource> {
-  if (supportsImageBitmap) {
-    try {
-      return await decodeViaBitmap(url);
-    } catch {
-      // cae al fallback
-    }
+  try {
+    return await decodeViaImage(url);
+  } catch {
+    if (!supportsImageBitmap) throw new Error('decode failed');
   }
-  return decodeViaImage(url);
+  return decodeViaBitmap(url);
 }
 
+/** Libera la frame: close() explícito si es ImageBitmap; un <img> se suelta al perder la referencia. */
 function release(frame: FrameSource) {
   if ('close' in frame && typeof frame.close === 'function') frame.close();
+  else (frame as HTMLImageElement).src = '';
 }
 
 export class FrameCache {
