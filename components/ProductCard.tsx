@@ -5,7 +5,7 @@ import { AlertIcon } from '@/components/Icons';
 import { Button } from '@/components/Button';
 import { PriceTag } from '@/components/PriceTag';
 import { QuantityControl } from '@/components/QuantityControl';
-import { useCart } from '@/lib/cart';
+import { useCartData } from '@/lib/cart';
 import { track } from '@/lib/analytics';
 import type { Product } from '@/types';
 
@@ -16,7 +16,8 @@ export function ProductCard({
   product: Product;
   priority?: boolean;
 }) {
-  const { quantityOf, add, decrease, remove } = useCart();
+  // Solo datos: abrir/cerrar el drawer no re-renderiza el catálogo.
+  const { quantityOf, add, decrease, remove } = useCartData();
   const quantity = quantityOf(product.id);
   const unavailable = !product.available;
 

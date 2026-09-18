@@ -42,7 +42,7 @@ export function CategoryNav() {
 
   return (
     <div
-      className="sticky z-categories bg-bg-base/95 py-3 backdrop-blur"
+      className="sticky z-categories bg-bg-base/95 py-3"
       style={{ top: 'calc(74px + env(safe-area-inset-top, 0px))' }}
     >
       <nav aria-label="Categorías del menú" className="mx-auto max-w-shell px-4 lg:px-6">

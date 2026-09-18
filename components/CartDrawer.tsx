@@ -71,7 +71,7 @@ export function CartDrawer() {
         type="button"
         aria-label="Cerrar el pedido"
         onClick={closeCart}
-        className="absolute inset-0 h-full w-full cursor-default bg-bg-base/[0.72] backdrop-blur-[2px]"
+        className="absolute inset-0 h-full w-full cursor-default bg-bg-base/[0.72]"
       />
 
       <div

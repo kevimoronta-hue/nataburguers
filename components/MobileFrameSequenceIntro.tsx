@@ -34,21 +34,21 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  *     en bruto (~1,1 GB si nada los liberase nunca).
  *  4. Anclaje: sticky + 100dvh (absorbe la barra dinámica de Safari a
  *     nivel CSS) dentro de un spacer de altura fija en vh — sin JS para
- *     el posicionamiento en sí.
+ *     el posicionamiento en sí. El contenido (main/footer) vive en el
+ *     flujo desde el primer render, justo debajo: la geometría del
+ *     documento nunca cambia durante ni al terminar la intro.
+ *  5. Responsabilidades: `tick()` es el ÚNICO autor del estado visual
+ *     (frame, badge, navbar, barra del pedido). "Saltar intro" solo
+ *     navega (un scrollTo instantáneo al ancla post-intro) y deja que el
+ *     tick refleje la nueva posición. Un solo camino para todas las
+ *     plataformas.
  */
 
 const MOBILE_QUERY = '(max-width: 767px)';
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)';
 
-// Solo el "Saltar intro" necesita un camino distinto en iOS: revelar
-// contenido + saltar el scroll en el mismo tick es estable en Android/
-// Chrome, pero en iOS/WebKit produce freezes o transiciones rotas. Todo
-// lo demás (preload, render loop, mapping de frames) es idéntico en
-// ambas plataformas.
-const IS_IOS =
-  typeof navigator !== 'undefined' &&
-  (/iP(hone|od|ad)/.test(navigator.userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+/** Ancla post-intro: la sección Hero ("Tu antojo empieza aquí"). */
+const POST_INTRO_TARGET_ID = 'inicio';
 
 export function MobileFrameSequenceIntro() {
   const [isMobile, setIsMobile] = useState(false);
@@ -76,7 +76,7 @@ const TOTAL_FRAMES = 193;
 const LAST_INDEX = TOTAL_FRAMES - 1;
 const SCROLL_VH = 450;
 
-// Revela main/footer/cartbar al terminar la intro. Independiente de la navbar.
+// Muestra la barra del pedido (fixed) al terminar la intro. Independiente de la navbar.
 const CONTENT_REVEAL_ON = 0.985;
 const CONTENT_REVEAL_OFF = 0.965;
 
@@ -162,7 +162,6 @@ function navbarVisual(frameIndex: number) {
   return {
     opacity: progress,
     translateY: (1 - progress) * -12,
-    blur: (1 - progress) * 2,
     interactive: progress >= 0.85,
   };
 }
@@ -199,12 +198,13 @@ function MobileFrameSequence() {
 
   const skippingRef = useRef(false);
   const doneRef = useRef(false);
-  // Generación del salto en curso. Cada clic en "Saltar intro" la
-  // incrementa; los callbacks (rAF) de ese clic solo actúan si siguen
-  // siendo la generación vigente. Así, si por lo que sea un callback de
-  // un salto anterior tardara en ejecutarse, queda invalidado en vez de
-  // pisar el resultado del salto más reciente.
-  const skipTokenRef = useRef(0);
+  // Último índice aplicado a badge/navbar: evita reescribir estilos en
+  // cada evento de scroll cuando la frame no ha cambiado (p. ej. mientras
+  // se navega por el menú, ya fuera de la intro).
+  const appliedIndexRef = useRef(-1);
+  // Permite que "Saltar intro" pida al render loop un repintado inmediato
+  // tras el scrollTo, sin esperar al siguiente evento de scroll.
+  const requestTickRef = useRef<() => void>(() => {});
 
   const readinessRef = useRef({
     allFramesReady: false, // fetch + decode de las 193, completo
@@ -392,21 +392,25 @@ function MobileFrameSequence() {
     };
   }, [reducedMotion, isExperienceReady]);
 
-  /** Revela main/footer/cartbar. La navbar no depende de esto. */
+  /** Muestra/oculta la barra del pedido (fixed). main/footer nunca se tocan. */
   const setContentRevealed = useCallback((done: boolean) => {
     if (doneRef.current === done) return;
     doneRef.current = done;
     document.documentElement.classList.toggle('nb-intro-done', done);
   }, []);
 
-  /** Estilo inline directo, sin transición CSS: debe reflejar el frame actual al instante. */
+  /**
+   * Estilo inline directo, sin transición CSS: debe reflejar el frame
+   * actual al instante. Solo opacity/transform (compositor); el liquid
+   * glass del header es su propio backdrop-filter, aquí no se añade
+   * ningún filter.
+   */
   const updateNavbar = useCallback((frameIndex: number) => {
     const header = document.querySelector<HTMLElement>('.site-header');
     if (!header) return;
-    const { opacity, translateY, blur, interactive } = navbarVisual(frameIndex);
+    const { opacity, translateY, interactive } = navbarVisual(frameIndex);
     header.style.opacity = String(opacity);
     header.style.transform = `translateY(${translateY}px)`;
-    header.style.filter = blur > 0.01 ? `blur(${blur}px)` : 'none';
     header.style.pointerEvents = interactive ? 'auto' : 'none';
   }, []);
 
@@ -442,43 +446,46 @@ function MobileFrameSequence() {
     let ticking = false;
     let rafId = 0;
 
-    function computeProgress() {
-      const section = sectionRef.current;
-      if (!section) return 0;
-      const rect = section.getBoundingClientRect();
-      const scrollable = section.offsetHeight - window.innerHeight;
-      if (scrollable <= 0) return 1;
-      return Math.min(Math.max(-rect.top / scrollable, 0), 1);
-    }
-
     function tick() {
       ticking = false;
       if (skippingRef.current) return;
 
       const section = sectionRef.current;
-      if (section && section.getBoundingClientRect().bottom <= 0) {
-        // Ya salió de la zona de la intro: no hay nada más que pintar.
-        setContentRevealed(true);
-        return;
-      }
+      if (!section) return;
 
-      const progress = computeProgress();
+      const rect = section.getBoundingClientRect();
+      const pastIntro = rect.bottom <= 0;
+
+      // Progreso real de scroll = única fuente de verdad. Fuera de la
+      // intro (más abajo en el documento) el estado es simplemente el
+      // final: última frame, navbar completa, badge oculto.
+      let progress = 1;
+      if (!pastIntro) {
+        const scrollable = section.offsetHeight - window.innerHeight;
+        progress = scrollable <= 0 ? 1 : Math.min(Math.max(-rect.top / scrollable, 0), 1);
+      }
       const frameIndex = Math.min(Math.max(Math.round(progress * LAST_INDEX), 0), LAST_INDEX);
 
       // Latest-frame-wins: se pinta directamente la frame que corresponde
       // a la posición actual. No hay frames intermedias que "reproducir".
-      const img = framesRef.current[frameIndex];
-      if (img) {
-        lastGoodIndexRef.current = frameIndex;
-        drawFrame(ctx, canvas, img);
-      } else {
-        // No debería pasar (todo se precargó), pero por si un frame
-        // puntual falló: se mantiene la última válida, nunca vacío/negro.
-        drawFrame(ctx, canvas, framesRef.current[lastGoodIndexRef.current]);
+      // Con el canvas fuera de pantalla no hay nada que pintar.
+      if (!pastIntro) {
+        const img = framesRef.current[frameIndex];
+        if (img) {
+          lastGoodIndexRef.current = frameIndex;
+          drawFrame(ctx, canvas, img);
+        } else {
+          // No debería pasar (todo se precargó), pero por si un frame
+          // puntual falló: se mantiene la última válida, nunca vacío/negro.
+          drawFrame(ctx, canvas, framesRef.current[lastGoodIndexRef.current]);
+        }
       }
 
-      updateBadge(frameIndex);
-      updateNavbar(frameIndex);
+      if (appliedIndexRef.current !== frameIndex) {
+        appliedIndexRef.current = frameIndex;
+        updateBadge(frameIndex);
+        updateNavbar(frameIndex);
+      }
 
       if (progress >= CONTENT_REVEAL_ON) setContentRevealed(true);
       else if (progress < CONTENT_REVEAL_OFF) setContentRevealed(false);
@@ -490,9 +497,11 @@ function MobileFrameSequence() {
       rafId = window.requestAnimationFrame(tick);
     }
 
+    requestTickRef.current = tick;
     tick();
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => {
+      requestTickRef.current = () => {};
       window.removeEventListener('scroll', onScroll);
       if (rafId) window.cancelAnimationFrame(rafId);
     };
@@ -563,109 +572,34 @@ function MobileFrameSequence() {
     };
   }, []);
 
+  /**
+   * "Saltar intro" NAVEGA, nada más: no pinta frames, no toca la navbar,
+   * no revela contenido. Un único camino para todas las plataformas.
+   * El destino es el ancla real del Hero ("Tu antojo empieza aquí"), que
+   * ya está en el flujo del documento: el scrollTo es exacto por
+   * construcción, sin verificación ni reintentos. Tras el salto, `tick()`
+   * lee la nueva posición y aplica el estado visual que le corresponde.
+   */
   const handleSkip = useCallback(() => {
-    // Deliberadamente NO se comprueba `doneRef.current` aquí: el botón
-    // debe ser idempotente y ejecutar siempre el mismo salto, sin
-    // importar si ya se saltó antes, si se volvió a subir a la intro, o
-    // en qué frame está. `doneRef` solo evita un doble-toggle de la
-    // clase CSS dentro de `setContentRevealed`, nunca debe decidir si el
-    // clic "cuenta". El único candado real es `skippingRef`, y protege
-    // contra una doble ejecución CONCURRENTE del propio salto, no contra
-    // clics posteriores separados en el tiempo.
-    if (skippingRef.current) return;
+    if (skippingRef.current) return; // candado breve contra reentrada
     skippingRef.current = true;
-    const token = ++skipTokenRef.current;
 
     // Un <button> que sigue enfocado puede hacer que iOS intente
     // "recentrar" el scroll sobre él en cuanto su posición cambia bajo el
     // dedo: se le quita el foco antes de mover nada.
     (document.activeElement as HTMLElement | null)?.blur?.();
 
-    // Paso común a ambas plataformas: fija la intro en su estado final
-    // (frame, navbar, badge) SIN tocar todavía el resto del DOM. No
-    // desmonta nada, no resetea `framesRef`, no toca el canvas salvo para
-    // pintar la última frame: la secuencia sigue viva y montada.
-    const canvas = canvasRef.current;
-    const ctx = getCtx();
-    if (canvas && ctx) {
-      const last = framesRef.current[LAST_INDEX] ?? framesRef.current[lastGoodIndexRef.current];
-      drawFrame(ctx, canvas, last);
-      lastGoodIndexRef.current = LAST_INDEX;
-      updateBadge(LAST_INDEX);
+    const target = document.getElementById(POST_INTRO_TARGET_ID);
+    if (target) {
+      const top = target.getBoundingClientRect().top + window.scrollY;
+      // 'instant' ignora el scroll-behavior: smooth del <html>: no recorre
+      // la intro visualmente. Salto directo por pixel, nunca scrollIntoView.
+      window.scrollTo({ top, behavior: 'instant' });
     }
-    updateNavbar(LAST_INDEX);
 
-    // Destino único, explícito: el propio <main id="main-content">, cuyo
-    // primer hijo es el Hero ("Tu antojo empieza aquí"). El skip navega
-    // a ESTA ancla — nunca a "progress = 1" ni a "última frame". El
-    // canvas/la secuencia no deciden nunca el destino, solo se pintan en
-    // su estado final por estética durante la transición.
-    const jumpToPostIntroTarget = () => {
-      const postIntroTarget = document.getElementById('main-content');
-      if (!postIntroTarget) return true;
-      const html = document.documentElement;
-      const prevScrollBehavior = html.style.scrollBehavior;
-      html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
-      const top = postIntroTarget.getBoundingClientRect().top + window.scrollY;
-      window.scrollTo(0, top); // salto directo por pixel, NUNCA scrollIntoView
-      html.style.scrollBehavior = prevScrollBehavior;
-      // ¿Ya cruzamos el límite real de la intro? Si no, el salto quedó
-      // corto (ver comentario más abajo) y hay que reintentarlo.
-      return postIntroTarget.getBoundingClientRect().top <= 0.5;
-    };
-
-    if (IS_IOS) {
-      // iOS/WebKit: revelar el contenido (display:none → block de un
-      // subárbol grande, que además dispara la carga de sus imágenes) en
-      // el MISMO tick que el salto de scroll de ~450vh es lo que produce
-      // el freeze / la transición rota en Safari. Se separan en dos
-      // frames sucesivos; el render loop de la secuencia sigue vivo y
-      // solo se pausa mientras dura esta breve transición.
-      window.requestAnimationFrame(() => {
-        if (skipTokenRef.current !== token) return; // superado por un clic más reciente
-        setContentRevealed(true);
-
-        window.requestAnimationFrame(() => {
-          if (skipTokenRef.current !== token) return;
-
-          // La barra de direcciones de Safari puede mostrarse u
-          // ocultarse justo al saltar, según el estado en que ya
-          // estuviera ANTES del clic (que difiere entre un skip inicial
-          // y uno hecho tras haber scrolleado antes): eso desplaza
-          // `window.scrollY` unos píxeles después del `scrollTo` y puede
-          // dejar el destino a medio cruzar el límite de la intro. Ahí
-          // es donde `tick()` (que sigue vivo) ve "todavía dentro de la
-          // intro, progress ≈ 1" y repinta la última frame — pareciendo
-          // que el skip "no navegó" sino que "terminó la animación".
-          // Se verifica el aterrizaje real durante unos pocos frames
-          // (nunca una pelea indefinida contra un momentum continuo,
-          // solo la corrección de un posible asentamiento puntual de la
-          // toolbar) y el candado sigue activo mientras tanto, así
-          // `tick()` no puede pintar nada intermedio durante la
-          // verificación.
-          let attempts = 0;
-          const verify = () => {
-            if (skipTokenRef.current !== token) return;
-            const landed = jumpToPostIntroTarget();
-            attempts += 1;
-            if (!landed && attempts < 4) {
-              window.requestAnimationFrame(verify);
-              return;
-            }
-            skippingRef.current = false;
-          };
-          verify();
-        });
-      });
-    } else {
-      // Android/desktop: la vía síncrona ya es estable aquí, sin
-      // necesidad de repartirla entre varios frames ni de verificar el
-      // aterrizaje.
-      setContentRevealed(true);
-      jumpToPostIntroTarget();
-      skippingRef.current = false;
-    }
-  }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
+    skippingRef.current = false;
+    requestTickRef.current();
+  }, []);
 
   // ---------------------------------------------------------------------
   // Render

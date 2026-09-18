@@ -87,10 +87,15 @@ function parseStoredCart(raw: string | null): CartLine[] {
 }
 
 /* ------------------------------------------------------------------ */
-/* Context                                                             */
+/* Contexts                                                            */
+/*                                                                     */
+/* Dos contextos separados a propósito: los DATOS del pedido (los       */
+/* consume todo el catálogo) y el estado de UI del drawer (isOpen, solo */
+/* lo consumen Header, CartBar y CartDrawer). Así abrir/cerrar "Pedidos" */
+/* no vuelve a renderizar las 22 ProductCard.                          */
 /* ------------------------------------------------------------------ */
 
-export interface CartValue {
+export interface CartData {
   lines: CartLineDetailed[];
   count: number;
   subtotal: number;
@@ -105,16 +110,27 @@ export interface CartValue {
   decrease: (id: string) => void;
   remove: (id: string) => void;
   clear: () => void;
-  isOpen: boolean;
-  openCart: () => void;
-  closeCart: () => void;
   /** Nombre del último producto agregado, para el anuncio accesible. */
   lastAdded: string | null;
 }
 
-const CartContext = createContext<CartValue | null>(null);
+export interface CartUi {
+  isOpen: boolean;
+  openCart: () => void;
+  closeCart: () => void;
+}
 
-export function useCartState(): CartValue {
+export type CartValue = CartData & CartUi;
+
+const CartDataContext = createContext<CartData | null>(null);
+const CartUiContext = createContext<CartUi | null>(null);
+
+export interface CartState {
+  data: CartData;
+  ui: CartUi;
+}
+
+export function useCartState(): CartState {
   const [lines, dispatch] = useReducer(reducer, [] as CartLine[]);
   const [ready, setReady] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
@@ -180,30 +196,50 @@ export function useCartState(): CartValue {
   const openCart = useCallback(() => setIsOpen(true), []);
   const closeCart = useCallback(() => setIsOpen(false), []);
 
-  return {
-    lines: detailed,
-    count,
-    subtotal,
-    deliveryFee,
-    total: subtotal + deliveryFee,
-    isEmpty: count === 0,
-    ready,
-    quantityOf,
-    add,
-    decrease,
-    remove,
-    clear,
-    isOpen,
-    openCart,
-    closeCart,
-    lastAdded,
-  };
+  const data = useMemo<CartData>(
+    () => ({
+      lines: detailed,
+      count,
+      subtotal,
+      deliveryFee,
+      total: subtotal + deliveryFee,
+      isEmpty: count === 0,
+      ready,
+      quantityOf,
+      add,
+      decrease,
+      remove,
+      clear,
+      lastAdded,
+    }),
+    [detailed, count, subtotal, deliveryFee, ready, quantityOf, add, decrease, remove, clear, lastAdded],
+  );
+
+  const ui = useMemo<CartUi>(() => ({ isOpen, openCart, closeCart }), [isOpen, openCart, closeCart]);
+
+  return { data, ui };
 }
 
-export const CartProvider = CartContext.Provider;
+export const CartDataProvider = CartDataContext.Provider;
+export const CartUiProvider = CartUiContext.Provider;
 
-export function useCart(): CartValue {
-  const value = useContext(CartContext);
-  if (!value) throw new Error('useCart debe usarse dentro de <CartRoot>');
+/** Solo datos del pedido: para el catálogo y el formulario. No se re-renderiza al abrir/cerrar el drawer. */
+export function useCartData(): CartData {
+  const value = useContext(CartDataContext);
+  if (!value) throw new Error('useCartData debe usarse dentro de <CartRoot>');
   return value;
+}
+
+/** Solo estado del drawer. */
+export function useCartUi(): CartUi {
+  const value = useContext(CartUiContext);
+  if (!value) throw new Error('useCartUi debe usarse dentro de <CartRoot>');
+  return value;
+}
+
+/** Fachada para los componentes que necesitan ambos (Header, CartBar, CartDrawer). */
+export function useCart(): CartValue {
+  const data = useCartData();
+  const ui = useCartUi();
+  return { ...data, ...ui };
 }

@@ -5,7 +5,7 @@ import { Button } from '@/components/Button';
 import { FormField } from '@/components/FormField';
 import { CheckIcon, WhatsAppIcon } from '@/components/Icons';
 import { BUSINESS, FIELD_LIMITS } from '@/lib/config';
-import { useCart } from '@/lib/cart';
+import { useCartData } from '@/lib/cart';
 import { buildOrderMessage, buildOrderUrl, validateCustomer } from '@/lib/whatsapp';
 import type { CustomerErrors } from '@/lib/whatsapp';
 import { track } from '@/lib/analytics';
@@ -27,7 +27,7 @@ export function CheckoutForm() {
   const [copied, setCopied] = useState(false);
   const firstErrorRef = useRef<string | null>(null);
 
-  const { lines, subtotal, deliveryFee, total, count } = useCart();
+  const { lines, subtotal, deliveryFee, total, count } = useCartData();
 
   const payload = useMemo(
     () => ({ lines, subtotal, deliveryFee, total, customer }),
