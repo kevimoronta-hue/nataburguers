@@ -17,6 +17,13 @@ const nextConfig = {
           { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
         ],
       },
+      {
+        // Variante "lite" (JPEG 720x1280) para dispositivos que decodifican despacio.
+        source: '/sequence-mobile-lite/:path*',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=31536000, immutable' },
+        ],
+      },
     ];
   },
 };

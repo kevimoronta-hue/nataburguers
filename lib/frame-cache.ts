@@ -15,22 +15,34 @@
  * no se puede cancelar: al resolver, si ya no cabe en la ventana, se
  * cierra en el acto.
  *
- * Primitiva de decode: `<img>` + `decode()` (la de la versión histórica
- * que funcionaba en iOS): WebKit decodifica en un hilo aparte y el bitmap
- * es purgable. `createImageBitmap` queda solo como fallback: en WebKit
- * decodifica en el hilo principal y su memoria no es purgable.
+ * Dos modos de almacenamiento, elegidos por capacidad del dispositivo
+ * (ver MobileFrameSequenceIntro), nunca por plataforma:
+ *  - 'bitmap' (estándar: iPhone y móviles potentes): `<img>.decode()` y
+ *    copia a `ImageBitmap`; ventana estricta; `close()` al salir de ella.
+ *  - 'image' (lite: poca RAM / CPU lenta): la frame se conserva como
+ *    `<img>` sin copia (cero trabajo de bitmap en el hilo principal);
+ *    Chrome gestiona los píxeles decodificados en su caché descartable,
+ *    como el motor original. Retención LRU (`retain` frames, encodadas,
+ *    ~60 KB cada una) más allá de la ventana de pre-decode, para que un
+ *    ida-y-vuelta no vuelva a decodificar nada.
  */
 
 export type FrameSource = ImageBitmap | HTMLImageElement;
 
+export type FrameStorage = 'bitmap' | 'image';
+
 export interface FrameCacheOptions {
   total: number;
   src: (index: number) => string;
-  /** Frames a mantener detrás / delante en la dirección del scroll. */
+  /** Frames a pre-decodificar detrás / delante en la dirección del scroll. */
   behind: number;
   ahead: number;
   /** Decodes simultáneos como máximo. */
   concurrency: number;
+  /** 'bitmap' (estándar) | 'image' (lite). */
+  storage: FrameStorage;
+  /** Solo 'image': máximo de frames retenidas (LRU). Sin valor = ventana estricta. */
+  retain?: number;
   /** Se llama cuando una frame queda decodificada y dentro de la ventana. */
   onFrameReady?: (index: number) => void;
 }
@@ -71,9 +83,9 @@ function decodeViaImage(url: string): Promise<HTMLImageElement> {
  *     con `close()` en el acto.
  * Si no hay `createImageBitmap`, se conserva el `<img>`.
  */
-async function decodeFrame(url: string): Promise<FrameSource> {
+async function decodeFrame(url: string, storage: FrameStorage): Promise<FrameSource> {
   const img = await decodeViaImage(url);
-  if (!supportsImageBitmap) return img;
+  if (storage === 'image' || !supportsImageBitmap) return img;
   try {
     const bitmap = await createImageBitmap(img);
     img.src = '';
@@ -83,15 +95,21 @@ async function decodeFrame(url: string): Promise<FrameSource> {
   }
 }
 
-/** Libera la frame: close() explícito si es ImageBitmap; un <img> se suelta al perder la referencia. */
+/**
+ * Libera la frame. ImageBitmap: `close()` explícito. `<img>` (lite): solo
+ * se suelta la referencia — no se fuerza a Chrome a tirar su caché.
+ */
 function release(frame: FrameSource) {
   if ('close' in frame && typeof frame.close === 'function') frame.close();
-  else (frame as HTMLImageElement).src = '';
 }
 
 export class FrameCache {
   private readonly decoded = new Map<number, FrameSource>();
   private readonly inFlight = new Set<number>();
+  /** Último uso por frame (tick lógico), para la retención LRU en modo lite. */
+  private readonly lastUsed = new Map<number, number>();
+  private readonly everDecoded = new Set<number>();
+  private tick = 0;
   private queue: number[] = [];
   private target = 0;
   private direction: 1 | -1 = 1;
@@ -106,12 +124,21 @@ export class FrameCache {
   private hits = 0;
   private misses = 0;
   private evictions = 0;
+  private redecodes = 0;
   private decodeCount = 0;
   private decodeMsTotal = 0;
   private maxDistance = 0;
 
-  constructor(private readonly opts: FrameCacheOptions) {
+  private readonly opts: FrameCacheOptions;
+
+  constructor(opts: FrameCacheOptions) {
+    this.opts = { ...opts };
     this.computeWindow();
+  }
+
+  private touch(index: number) {
+    this.tick += 1;
+    this.lastUsed.set(index, this.tick);
   }
 
   /** Frame decodificada exacta, si está. */
@@ -124,6 +151,7 @@ export class FrameCache {
     const exact = this.decoded.get(index);
     if (exact) {
       this.hits += 1;
+      this.touch(index);
       return { index, frame: exact };
     }
     this.misses += 1;
@@ -131,11 +159,13 @@ export class FrameCache {
       const before = this.decoded.get(index - d);
       if (before) {
         this.maxDistance = Math.max(this.maxDistance, d);
+        this.touch(index - d);
         return { index: index - d, frame: before };
       }
       const after = this.decoded.get(index + d);
       if (after) {
         this.maxDistance = Math.max(this.maxDistance, d);
+        this.touch(index + d);
         return { index: index + d, frame: after };
       }
     }
@@ -178,6 +208,21 @@ export class FrameCache {
     this.setTarget(index);
   }
 
+  /**
+   * Cambia de perfil en caliente (p. ej. estándar → lite tras medir el
+   * decode real en el loader). Las frames ya decodificadas se conservan
+   * tal cual (bitmap o <img>); solo cambian ventana, concurrencia,
+   * retención y el modo de las decodificaciones futuras.
+   */
+  reconfigure(
+    next: Partial<Pick<FrameCacheOptions, 'src' | 'behind' | 'ahead' | 'concurrency' | 'storage' | 'retain'>>,
+  ) {
+    Object.assign(this.opts, next);
+    this.computeWindow();
+    this.rebuildQueue();
+    this.pump();
+  }
+
   /** Resuelve cuando no queda nada en cola ni en curso. */
   whenIdle(): Promise<void> {
     if (this.queue.length === 0 && this.inFlight.size === 0) return Promise.resolve();
@@ -186,6 +231,7 @@ export class FrameCache {
 
   stats() {
     return {
+      storage: this.opts.storage,
       target: this.target,
       window: [this.lo, this.hi] as const,
       fast: this.fast,
@@ -195,6 +241,7 @@ export class FrameCache {
       hits: this.hits,
       misses: this.misses,
       evictions: this.evictions,
+      redecodes: this.redecodes,
       decodeMsAvg: this.decodeCount ? Math.round(this.decodeMsTotal / this.decodeCount) : 0,
       maxDistance: this.maxDistance,
     };
@@ -205,6 +252,7 @@ export class FrameCache {
     this.queue = [];
     for (const frame of this.decoded.values()) release(frame);
     this.decoded.clear();
+    this.lastUsed.clear();
     this.resolveIdle();
   }
 
@@ -249,11 +297,36 @@ export class FrameCache {
    * que pintar; se cierra en cuanto llega la primera frame de la ventana.
    */
   private evict() {
+    const { retain } = this.opts;
+    if (retain !== undefined) {
+      // Lite / LRU: la ventana solo decide qué pre-decodificar. Se retiene
+      // todo hasta `retain` frames; por encima, se sueltan las menos usadas
+      // que estén fuera de la ventana (las de la ventana nunca se tocan).
+      if (this.decoded.size <= retain) return;
+      const candidates = [...this.decoded.keys()]
+        .filter((index) => !this.inWindow(index))
+        .sort((a, b) => (this.lastUsed.get(a) ?? 0) - (this.lastUsed.get(b) ?? 0));
+      let excess = this.decoded.size - retain;
+      for (const index of candidates) {
+        if (excess <= 0) break;
+        const frame = this.decoded.get(index);
+        if (frame) release(frame);
+        this.decoded.delete(index);
+        this.lastUsed.delete(index);
+        this.evictions += 1;
+        excess -= 1;
+      }
+      return;
+    }
+
+    // Estándar: ventana estricta. Excepción: una frame ancla mientras la
+    // ventana nueva aún no tiene ninguna frame decodificada (salto grande).
     const anchor = this.hasDecodedInWindow() ? null : this.nearestIndex(this.target);
     for (const [index, frame] of this.decoded) {
       if (!this.inWindow(index) && index !== anchor) {
         release(frame);
         this.decoded.delete(index);
+        this.lastUsed.delete(index);
         this.evictions += 1;
       }
     }
@@ -286,8 +359,10 @@ export class FrameCache {
     while (!this.disposed && this.inFlight.size < this.opts.concurrency && this.queue.length > 0) {
       const index = this.queue.shift() as number;
       this.inFlight.add(index);
+      if (this.everDecoded.has(index)) this.redecodes += 1;
+      this.everDecoded.add(index);
       const startedAt = performance.now();
-      decodeFrame(this.opts.src(index)).then(
+      decodeFrame(this.opts.src(index), this.opts.storage).then(
         (frame) => {
           this.decodeCount += 1;
           this.decodeMsTotal += performance.now() - startedAt;
@@ -301,11 +376,14 @@ export class FrameCache {
   private settle(index: number, frame: FrameSource | null) {
     this.inFlight.delete(index);
     if (frame) {
-      if (this.disposed || !this.inWindow(index)) {
-        release(frame); // llegó tarde: ya no es útil
+      // Estándar: fuera de la ventana ya no es útil. Lite (LRU): se guarda
+      // igualmente, es una frame reciente.
+      if (this.disposed || (this.opts.retain === undefined && !this.inWindow(index))) {
+        release(frame);
       } else {
         this.decoded.set(index, frame);
-        this.evict(); // suelta la frame ancla si la había
+        this.touch(index);
+        this.evict(); // suelta la ancla (estándar) o el exceso LRU (lite)
         this.opts.onFrameReady?.(index);
       }
     }

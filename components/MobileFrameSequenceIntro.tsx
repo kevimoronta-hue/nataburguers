@@ -71,14 +71,75 @@ const MAX_RETRIES = 3;
 const FETCH_PROGRESS_SHARE = 0.85;
 
 /**
- * Ventana decodificada: 22 frames + objetivo (≈130 MB máx.). En reposo
- * 8 detrás / 14 delante en la dirección del scroll; en un swipe rápido
- * el mismo presupuesto se vuelca hacia delante (3 detrás / 19 delante).
+ * Perfil del motor según capacidad REAL del dispositivo (nunca por
+ * plataforma ni user-agent). Quién carga qué se decide así, al principio
+ * del loader, y queda escrito en `?nbdebug` (líneas "profile"):
+ *
+ *  1. pista estática: `navigator.deviceMemory` (solo Chrome/Android; en
+ *     Safari es undefined → iPhone nunca entra aquí) ≤ 4 GB, o ≤ 4 núcleos
+ *     cuando deviceMemory existe → lite;
+ *  2. sonda: se decodifican PROBE_FRAMES frames WebP en secuencia y se
+ *     cronometra. ≥ LITE_DECODE_MS por frame → lite. Un iPhone o un
+ *     Android reciente decodifica en 8-20 ms; un Android viejo en 60-200.
+ *
+ *  estándar: WebP 900×1600 (/sequence-mobile), ventana estricta 8/14
+ *            (≈130 MB de ImageBitmap), 6 decodes, DPR cap 2.
+ *  lite:     JPEG 720×1280 (/sequence-mobile-lite; el JPEG se decodifica
+ *            2-3× más rápido que WebP en CPUs viejas y tiene un 40 % menos
+ *            de píxeles, de sobra para el canvas lite a DPR 1.5), frames
+ *            como <img> (sin copia a bitmap; Chrome gestiona los píxeles
+ *            en su caché descartable), retención LRU de 64 <img>,
+ *            pre-decode 3/12, 2 decodes, DPR cap 1.5, canvas opaco.
  */
-const WINDOW_BEHIND = 8;
-const WINDOW_AHEAD = 14;
-/** 6 decodes en paralelo (como la versión anterior); decode fuera del hilo principal. */
-const DECODE_CONCURRENCY = 6;
+type FrameFormat = 'webp' | 'jpeg';
+
+interface EngineProfile {
+  name: 'standard' | 'lite';
+  format: FrameFormat;
+  behind: number;
+  ahead: number;
+  concurrency: number;
+  storage: 'bitmap' | 'image';
+  retain: number | undefined;
+  dprCap: number;
+  opaque: boolean;
+}
+
+const STANDARD_PROFILE: EngineProfile = {
+  name: 'standard',
+  format: 'webp',
+  behind: 8,
+  ahead: 14,
+  concurrency: 6,
+  storage: 'bitmap',
+  retain: undefined,
+  dprCap: 2,
+  opaque: false,
+};
+
+const LITE_PROFILE: EngineProfile = {
+  name: 'lite',
+  format: 'jpeg',
+  behind: 3,
+  ahead: 12,
+  concurrency: 2,
+  storage: 'image',
+  retain: 64,
+  dprCap: 1.5,
+  opaque: true,
+};
+
+/** Frames WebP decodificadas en secuencia como sonda de velocidad. */
+const PROBE_FRAMES = 4;
+/** Decode medio (ms/frame) de la sonda a partir del cual el dispositivo es "lite". */
+const LITE_DECODE_MS = 40;
+
+const nav = typeof navigator !== 'undefined' ? (navigator as Navigator & { deviceMemory?: number }) : undefined;
+const DEVICE_MEMORY = nav?.deviceMemory;
+const DEVICE_CORES = nav?.hardwareConcurrency;
+const LITE_BY_SPECS =
+  DEVICE_MEMORY !== undefined &&
+  (DEVICE_MEMORY <= 4 || (DEVICE_CORES !== undefined && DEVICE_CORES <= 4));
 
 /** Clase one-way en <html>: main/footer están en el flujo. */
 const REVEALED_CLASS = 'nb-content-revealed';
@@ -145,8 +206,36 @@ const POST_INTRO_CRITICAL_IMAGES = '.site-header img, #inicio img';
 // Helpers puros
 // ---------------------------------------------------------------------------
 
-function frameSrc(oneBasedIndex: number) {
-  return `/sequence-mobile/frame_${String(oneBasedIndex).padStart(6, '0')}.webp`;
+function frameSrc(oneBasedIndex: number, format: FrameFormat) {
+  const name = String(oneBasedIndex).padStart(6, '0');
+  return format === 'jpeg' ? `/sequence-mobile-lite/frame_${name}.jpg` : `/sequence-mobile/frame_${name}.webp`;
+}
+
+/**
+ * Sonda: descarga y decodifica `count` frames WebP una tras otra y
+ * devuelve el tiempo medio de decode (ms). Mide el dispositivo real, no
+ * su ficha técnica. Las frames sondeadas quedan en la cache HTTP.
+ */
+async function probeDecodeMs(count: number): Promise<number> {
+  let total = 0;
+  let measured = 0;
+  for (let i = 0; i < count; i += 1) {
+    const url = frameSrc(i + 1, 'webp');
+    if (!(await fetchWithRetry(url))) continue;
+    const start = performance.now();
+    await new Promise<void>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        if (typeof img.decode === 'function') img.decode().then(() => resolve(), () => resolve());
+        else resolve();
+      };
+      img.onerror = () => resolve();
+      img.src = url;
+    });
+    total += performance.now() - start;
+    measured += 1;
+  }
+  return measured ? total / measured : 0;
 }
 
 function clamp01(n: number) {
@@ -203,12 +292,21 @@ function frameSize(frame: FrameSource) {
     : { w: frame.width, h: frame.height };
 }
 
+/**
+ * Contexto 2D del canvas. En lite es opaco (el fondo siempre se pinta):
+ * compositing más barato. Los atributos solo cuentan en la PRIMERA
+ * llamada, por eso no se pinta nada hasta que el perfil está decidido.
+ */
+function getCanvasContext(canvas: HTMLCanvasElement, opaque: boolean) {
+  return opaque ? canvas.getContext('2d', { alpha: false }) : canvas.getContext('2d');
+}
+
 /** Pinta `frame` en "contain" (nunca recorta el burger ni el logo). Sin frame, no toca el canvas. */
-function drawFrame(canvas: HTMLCanvasElement, frame: FrameSource | null) {
+function drawFrame(canvas: HTMLCanvasElement, frame: FrameSource | null, opaque: boolean) {
   if (!frame) return;
   const { w, h } = frameSize(frame);
   if (!w || !h) return;
-  const ctx = canvas.getContext('2d');
+  const ctx = getCanvasContext(canvas, opaque);
   if (!ctx) return;
   const cw = canvas.width;
   const ch = canvas.height;
@@ -220,9 +318,9 @@ function drawFrame(canvas: HTMLCanvasElement, frame: FrameSource | null) {
   ctx.drawImage(frame, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
 }
 
-/** Bitmap del canvas = tamaño CSS real (100 % del sticky en dvh) × DPR (cap 2). */
-function sizeCanvasBitmap(canvas: HTMLCanvasElement) {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+/** Bitmap del canvas = tamaño CSS real (100 % del sticky en dvh) × DPR (cap 2 estándar, 1.5 lite). */
+function sizeCanvasBitmap(canvas: HTMLCanvasElement, dprCap: number) {
+  const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
   const width = Math.round(canvas.clientWidth * dpr);
   const height = Math.round(canvas.clientHeight * dpr);
   if (width === canvas.width && height === canvas.height) return false;
@@ -321,6 +419,9 @@ function MobileFrameSequence() {
 
   /** Ventana de frames decodificadas (ver lib/frame-cache.ts). Se crea en el loader. */
   const cacheRef = useRef<FrameCache | null>(null);
+  /** Perfil del motor: pista estática al montar, confirmado/ajustado por la medida del loader. */
+  const profileRef = useRef<EngineProfile>(LITE_BY_SPECS ? LITE_PROFILE : STANDARD_PROFILE);
+  const phaseRef = useRef<Phase>('loading');
   /** Frame objetivo actual (según el scroll) y frame realmente pintada. */
   const targetIndexRef = useRef(0);
   const drawnIndexRef = useRef(-1);
@@ -340,6 +441,12 @@ function MobileFrameSequence() {
   useEffect(() => {
     revealContent();
     nbMark('mount: content revealed');
+    nbMark('profile (specs)', {
+      profile: profileRef.current.name,
+      deviceMemory: DEVICE_MEMORY ?? null,
+      cores: DEVICE_CORES ?? null,
+      devicePixelRatio: window.devicePixelRatio,
+    });
   }, []);
 
   // --- Render: scroll real → progress → frame → pintar -----------------
@@ -375,7 +482,7 @@ function MobileFrameSequence() {
     if (!pastIntro && cache) {
       const best = cache.nearest(frameIndex);
       if (best && best.index !== drawnIndexRef.current) {
-        drawFrame(canvas, best.frame);
+        drawFrame(canvas, best.frame, profileRef.current.opaque);
         drawnIndexRef.current = best.index;
       }
       if (NB_DEBUG && (!best || best.index !== frameIndex)) {
@@ -406,9 +513,11 @@ function MobileFrameSequence() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ro = new ResizeObserver(() => {
-      if (sizeCanvasBitmap(canvas)) {
+      if (sizeCanvasBitmap(canvas, profileRef.current.dprCap)) {
         drawnIndexRef.current = -1; // cambiar width/height borra el canvas
-        render();
+        // Durante el loader no se pinta (el loader tapa el canvas y los
+        // atributos del contexto dependen del perfil aún por decidir).
+        if (phaseRef.current === 'ready') render();
       }
     });
     ro.observe(canvas);
@@ -432,27 +541,63 @@ function MobileFrameSequence() {
 
   useEffect(() => {
     let cancelled = false;
+    phaseRef.current = 'loading';
     setPhase('loading');
     setLoadProgress(0);
 
     // Cache decodificada de esta carga. Se cierra entera al desmontar o al
-    // reintentar (cleanup del efecto).
+    // reintentar (cleanup del efecto). Nace con el perfil de la pista
+    // estática; la sonda puede cambiarlo antes de descargar nada más.
     const cache = new FrameCache({
       total: TOTAL_FRAMES,
-      src: (i) => frameSrc(i + 1),
-      behind: WINDOW_BEHIND,
-      ahead: WINDOW_AHEAD,
-      concurrency: DECODE_CONCURRENCY,
+      src: (i) => frameSrc(i + 1, profileRef.current.format),
+      behind: profileRef.current.behind,
+      ahead: profileRef.current.ahead,
+      concurrency: profileRef.current.concurrency,
+      storage: profileRef.current.storage,
+      retain: profileRef.current.retain,
       onFrameReady,
     });
     cacheRef.current = cache;
     drawnIndexRef.current = -1;
 
     (async () => {
-      // 1) Red: las 193 a la cache HTTP. Sin decodificar.
+      // 0) Sonda de velocidad de decode → decide quién carga qué.
+      const probeMs = await probeDecodeMs(PROBE_FRAMES);
+      if (cancelled) return;
+      if (profileRef.current.name === 'standard' && probeMs >= LITE_DECODE_MS) {
+        profileRef.current = LITE_PROFILE;
+        cache.reconfigure({
+          src: (i) => frameSrc(i + 1, LITE_PROFILE.format),
+          behind: LITE_PROFILE.behind,
+          ahead: LITE_PROFILE.ahead,
+          concurrency: LITE_PROFILE.concurrency,
+          storage: LITE_PROFILE.storage,
+          retain: LITE_PROFILE.retain,
+        });
+      }
+      const profile = profileRef.current;
+      const canvas = canvasRef.current;
+      if (canvas) {
+        sizeCanvasBitmap(canvas, profile.dprCap);
+        drawnIndexRef.current = -1;
+      }
+      nbMark('profile (final)', {
+        profile: profile.name,
+        format: profile.format,
+        probeMs: Math.round(probeMs),
+        threshold: LITE_DECODE_MS,
+        bySpecs: LITE_BY_SPECS,
+        window: `${profile.behind}/${profile.ahead}`,
+        concurrency: profile.concurrency,
+        retain: profile.retain ?? 'window',
+        dprCap: profile.dprCap,
+      });
+
+      // 1) Red: las 193 del formato elegido a la cache HTTP. Sin decodificar.
       let fetched = 0;
       const fetchedAll = await runPool(TOTAL_FRAMES, FETCH_CONCURRENCY, async (i) => {
-        const ok = await fetchWithRetry(frameSrc(i + 1));
+        const ok = await fetchWithRetry(frameSrc(i + 1, profile.format));
         if (cancelled) return false;
         if (ok) {
           fetched += 1;
@@ -465,10 +610,10 @@ function MobileFrameSequence() {
         setPhase('failed');
         return;
       }
-      nbMark('loader: network cache ready');
+      nbMark('loader: network cache ready', { format: profile.format });
 
-      // 2) Decodificar solo la primera ventana, volcada hacia delante
-      // (frames 0-22): absorbe el primer swipe grande sin frames frías.
+      // 2) Decodificar solo la primera ventana, volcada hacia delante:
+      // absorbe el primer swipe grande sin frames frías.
       cache.prime(0);
       await cache.whenIdle();
       if (cancelled) return;
@@ -489,6 +634,7 @@ function MobileFrameSequence() {
       if (cancelled) return;
       setLoadProgress(100);
       nbMark('loader: ready');
+      phaseRef.current = 'ready';
       setPhase('ready');
     })();
 
