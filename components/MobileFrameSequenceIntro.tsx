@@ -595,15 +595,23 @@ function MobileFrameSequence() {
     }
     updateNavbar(LAST_INDEX);
 
-    const jumpToMainContent = () => {
-      const target = document.getElementById('main-content');
-      if (!target) return;
+    // Destino único, explícito: el propio <main id="main-content">, cuyo
+    // primer hijo es el Hero ("Tu antojo empieza aquí"). El skip navega
+    // a ESTA ancla — nunca a "progress = 1" ni a "última frame". El
+    // canvas/la secuencia no deciden nunca el destino, solo se pintan en
+    // su estado final por estética durante la transición.
+    const jumpToPostIntroTarget = () => {
+      const postIntroTarget = document.getElementById('main-content');
+      if (!postIntroTarget) return true;
       const html = document.documentElement;
       const prevScrollBehavior = html.style.scrollBehavior;
       html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
-      const top = target.getBoundingClientRect().top + window.scrollY;
+      const top = postIntroTarget.getBoundingClientRect().top + window.scrollY;
       window.scrollTo(0, top); // salto directo por pixel, NUNCA scrollIntoView
       html.style.scrollBehavior = prevScrollBehavior;
+      // ¿Ya cruzamos el límite real de la intro? Si no, el salto quedó
+      // corto (ver comentario más abajo) y hay que reintentarlo.
+      return postIntroTarget.getBoundingClientRect().top <= 0.5;
     };
 
     if (IS_IOS) {
@@ -616,17 +624,45 @@ function MobileFrameSequence() {
       window.requestAnimationFrame(() => {
         if (skipTokenRef.current !== token) return; // superado por un clic más reciente
         setContentRevealed(true);
+
         window.requestAnimationFrame(() => {
           if (skipTokenRef.current !== token) return;
-          jumpToMainContent();
-          skippingRef.current = false;
+
+          // La barra de direcciones de Safari puede mostrarse u
+          // ocultarse justo al saltar, según el estado en que ya
+          // estuviera ANTES del clic (que difiere entre un skip inicial
+          // y uno hecho tras haber scrolleado antes): eso desplaza
+          // `window.scrollY` unos píxeles después del `scrollTo` y puede
+          // dejar el destino a medio cruzar el límite de la intro. Ahí
+          // es donde `tick()` (que sigue vivo) ve "todavía dentro de la
+          // intro, progress ≈ 1" y repinta la última frame — pareciendo
+          // que el skip "no navegó" sino que "terminó la animación".
+          // Se verifica el aterrizaje real durante unos pocos frames
+          // (nunca una pelea indefinida contra un momentum continuo,
+          // solo la corrección de un posible asentamiento puntual de la
+          // toolbar) y el candado sigue activo mientras tanto, así
+          // `tick()` no puede pintar nada intermedio durante la
+          // verificación.
+          let attempts = 0;
+          const verify = () => {
+            if (skipTokenRef.current !== token) return;
+            const landed = jumpToPostIntroTarget();
+            attempts += 1;
+            if (!landed && attempts < 4) {
+              window.requestAnimationFrame(verify);
+              return;
+            }
+            skippingRef.current = false;
+          };
+          verify();
         });
       });
     } else {
       // Android/desktop: la vía síncrona ya es estable aquí, sin
-      // necesidad de repartirla entre varios frames.
+      // necesidad de repartirla entre varios frames ni de verificar el
+      // aterrizaje.
       setContentRevealed(true);
-      jumpToMainContent();
+      jumpToPostIntroTarget();
       skippingRef.current = false;
     }
   }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
