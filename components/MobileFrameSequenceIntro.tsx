@@ -437,7 +437,7 @@ function MobileFrameSequence() {
 
     function tick() {
       ticking = false;
-      if (skippingRef.current) return;
+      if (skippingRef.current || doneRef.current) return;
 
       const section = sectionRef.current;
       if (section && section.getBoundingClientRect().bottom <= 0) {
@@ -505,6 +505,7 @@ function MobileFrameSequence() {
     }
 
     function onResize() {
+      if (doneRef.current) return; // intro terminada: nada que reajustar en este canvas
       const widthChanged = window.innerWidth !== lastWidth;
       const heightDelta = Math.abs(window.innerHeight - lastHeight);
       if (!widthChanged && heightDelta < RESIZE_MIN_HEIGHT_DELTA) return; // barra de Safari, se ignora
@@ -551,6 +552,15 @@ function MobileFrameSequence() {
     if (skippingRef.current || doneRef.current) return;
     skippingRef.current = true;
 
+    // Un <button> que sigue enfocado puede hacer que iOS intente
+    // "recentrar" el scroll sobre él en cuanto su posición cambia bajo el
+    // dedo: se le quita el foco antes de mover nada.
+    (document.activeElement as HTMLElement | null)?.blur?.();
+
+    // Paso 1: fija la intro en su estado final (frame, navbar, badge) SIN
+    // tocar todavía el resto del DOM. El badge queda oculto/no-interactivo
+    // de inmediato (badgeVisual en LAST_INDEX), lo que ya bloquea un
+    // segundo tap mientras dura la transición.
     const canvas = canvasRef.current;
     const ctx = getCtx();
     if (canvas && ctx) {
@@ -560,19 +570,55 @@ function MobileFrameSequence() {
       updateBadge(LAST_INDEX);
     }
     updateNavbar(LAST_INDEX);
-    setContentRevealed(true);
 
+    // Paso 2 (frame siguiente): revela main/footer/cartbar. En iOS, hacer
+    // esto (display:none → block de un subárbol grande, que además
+    // dispara la carga de sus imágenes) en el MISMO tick que un salto de
+    // scroll de ~450vh es lo que produce el freeze / la transición lenta.
+    // Se separa en su propio frame.
     window.requestAnimationFrame(() => {
-      const target = document.getElementById('main-content');
-      if (target) {
+      setContentRevealed(true);
+
+      // Paso 3 (otro frame más): deja que Safari termine de aplicar el
+      // layout del contenido recién revelado antes de leer su posición
+      // real y saltar el scroll.
+      window.requestAnimationFrame(() => {
+        const target = document.getElementById('main-content');
+        if (!target) {
+          skippingRef.current = false;
+          return;
+        }
+
         const html = document.documentElement;
         const prevScrollBehavior = html.style.scrollBehavior;
         html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
-        target.scrollIntoView({ behavior: 'auto', block: 'start' });
-        html.style.scrollBehavior = prevScrollBehavior;
-      }
-      window.requestAnimationFrame(() => {
-        skippingRef.current = false;
+
+        // Salto directo por pixel, NUNCA scrollIntoView: en iOS,
+        // scrollIntoView dentro de un ancestro sticky puede quedar
+        // peleando con el momentum scroll todavía activo o con el cambio
+        // de altura de la toolbar dinámica de Safari. Se recalcula el
+        // target en cada frame por si la toolbar cambia de alto a mitad
+        // del salto, y se reafirma el scroll durante una ventana corta
+        // para ganarle a cualquier momentum residual.
+        const jump = () => {
+          const top = target.getBoundingClientRect().top + window.scrollY;
+          window.scrollTo(0, top);
+        };
+
+        const SETTLE_MS = 300;
+        const start = performance.now();
+        jump();
+
+        const settle = (now: number) => {
+          jump();
+          if (now - start < SETTLE_MS) {
+            window.requestAnimationFrame(settle);
+          } else {
+            html.style.scrollBehavior = prevScrollBehavior;
+            skippingRef.current = false;
+          }
+        };
+        window.requestAnimationFrame(settle);
       });
     });
   }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
