@@ -140,19 +140,73 @@
 .nb-intro-loader {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 16px;
   background: #080706;
+  opacity: 1;
+  transition: opacity 320ms ease;
+}
+
+/*
+ * El loader nunca se desmonta al quedar listo: solo se desvanece (fade,
+ * nunca un salto) y deja de capturar toques. Mantenerlo en el DOM evita
+ * cualquier remonte accidental de la secuencia.
+ */
+.nb-intro-loader--hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .nb-intro-loader img {
   width: 128px;
   height: auto;
   opacity: 0.96;
+}
+
+.nb-intro-loader-bar {
+  width: 168px;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 90, 0, 0.2);
+}
+
+.nb-intro-loader-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #ff5a00;
+  transition: width 150ms ease;
+}
+
+.nb-intro-loader-text {
+  margin: 0;
+  font-family: theme('fontFamily.ui');
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #b8afa6;
+  font-variant-numeric: tabular-nums;
+}
+
+.nb-intro-retry {
+  min-height: 44px;
+  padding: 0 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 90, 0, 0.45);
+  background: rgba(255, 90, 0, 0.12);
+  color: #fff1d6;
+  font-family: theme('fontFamily.ui');
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.nb-intro-retry:focus-visible {
+  outline: 2px solid #ff7417;
+  outline-offset: 2px;
 }
 
 .nb-intro-loader-track {
