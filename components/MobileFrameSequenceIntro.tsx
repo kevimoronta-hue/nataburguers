@@ -558,7 +558,15 @@ function MobileFrameSequence() {
   }, []);
 
   const handleSkip = useCallback(() => {
-    if (skippingRef.current || doneRef.current) return;
+    // Deliberadamente NO se comprueba `doneRef.current` aquí: el botón
+    // debe ser idempotente y ejecutar siempre el mismo salto, sin
+    // importar si ya se saltó antes, si se volvió a subir a la intro, o
+    // en qué frame está. `doneRef` solo evita un doble-toggle de la
+    // clase CSS dentro de `setContentRevealed`, nunca debe decidir si el
+    // clic "cuenta". El único candado real es `skippingRef`, y protege
+    // contra una doble ejecución CONCURRENTE del propio salto, no contra
+    // clics posteriores separados en el tiempo.
+    if (skippingRef.current) return;
     skippingRef.current = true;
 
     // Un <button> que sigue enfocado puede hacer que iOS intente
