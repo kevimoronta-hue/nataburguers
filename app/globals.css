@@ -80,18 +80,26 @@
   }
 
   /*
-   * Contenido post-intro (main/footer/barra del pedido): oculto SOLO hasta
-   * la PRIMERA vez que se completa la intro en esta visita, sea por scroll
-   * natural o por "Saltar intro". `nb-content-revealed` se añade una vez
-   * y no se quita nunca: la geometría del documento cambia exactamente
-   * una vez, jamás durante un rewind ni en el hot path del scroll.
-   * Mientras no está revelado, el hero, sus animaciones de entrada y sus
-   * capas (blur, brasas) no existen para el compositor: la secuencia
-   * dispone de toda la memoria/GPU durante el primer pase.
+   * Contenido post-intro (main/footer): oculto solo hasta que la intro
+   * monta en el cliente. `nb-content-revealed` se añade UNA vez al montar
+   * (con el loader aún tapando la pantalla) y no se quita nunca: el
+   * layout completo de la página se paga al principio, en segundo plano,
+   * y NUNCA en el tap de "Saltar intro" ni en el hot path del scroll.
+   * Así el destino del skip ya está maquetado, pintado y con sus
+   * animaciones de entrada terminadas antes de que el botón exista.
    */
   html:not(.nb-content-revealed) .site-main,
-  html:not(.nb-content-revealed) .site-footer,
-  html:not(.nb-content-revealed) .site-cartbar {
+  html:not(.nb-content-revealed) .site-footer {
+    display: none;
+  }
+
+  /*
+   * La barra del pedido es `fixed`: se ocultaría sobre el canvas mientras
+   * se está dentro de la intro. `nb-past-intro` la pone/quita el render
+   * loop cuando la intro sale por arriba (un solo booleano, sin layout
+   * de página: la barra es un elemento pequeño fuera del flujo).
+   */
+  html:not(.nb-past-intro) .site-cartbar {
     display: none;
   }
 

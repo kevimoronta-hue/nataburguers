@@ -21,19 +21,21 @@ import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
  *    de Safari. El único JS de "viewport" es dimensionar el bitmap del
  *    canvas al tamaño real que le da el CSS (ResizeObserver).
  *
- *  CONTENIDO POST-INTRO — main/footer/cartbar están en `display:none`
- *    solo hasta la PRIMERA vez que se completa la intro. Se revelan una
- *    vez (clase one-way en <html>) y nunca se vuelven a ocultar: el layout
- *    completo de la página ocurre exactamente una vez, jamás en un rewind.
+ *  CONTENIDO POST-INTRO — main/footer se revelan UNA vez al montar (clase
+ *    one-way en <html>, con el loader aún tapando la pantalla). El layout
+ *    completo de la página y las animaciones de entrada del Hero se pagan
+ *    en segundo plano al principio, nunca en un tap ni en un rewind. La
+ *    barra del pedido (fixed) solo se muestra cuando la intro ya salió por
+ *    arriba (`nb-past-intro`, un booleano que mantiene el render loop).
  *
- *  SALTAR INTRO — navega, nada más: revela (si hace falta), espera a que
- *    las imágenes críticas del destino estén decodificadas (promesa real),
- *    y hace un scrollTo directo al ancla del Hero. Idempotente: cada clic
- *    ejecuta exactamente lo mismo, sea cual sea la frame o el historial.
+ *  SALTAR INTRO — síncrono: tap → scrollToSection('inicio') → render().
+ *    No espera nada: la destino ya está maquetada (reveal al montar) y sus
+ *    imágenes decodificadas (loader). Idempotente: cada clic ejecuta
+ *    exactamente lo mismo, sea cual sea la frame o el historial.
  *
  *  LOADER — antes de soltar la experiencia: 193 frames descargadas y
- *    decodificadas, fuentes listas, imágenes críticas del destino
- *    decodificadas. Cero red durante el scroll; skip a destino caliente.
+ *    decodificadas, fuentes listas, imágenes visibles al aterrizar tras el
+ *    skip (logo del header, burger del Hero) decodificadas.
  */
 
 // ---------------------------------------------------------------------------
@@ -47,9 +49,6 @@ const TOTAL_FRAMES = 193;
 const LAST_INDEX = TOTAL_FRAMES - 1;
 const SCROLL_VH = 450;
 
-/** Progreso a partir del cual se revela (una sola vez) el contenido post-intro. */
-const CONTENT_REVEAL_ON = 0.985;
-
 /** La navbar aparece sobre las últimas frames (168 → 184, 1-based). */
 const NAVBAR_START_INDEX = 167;
 const NAVBAR_END_INDEX = 183;
@@ -60,8 +59,32 @@ const MAX_RETRIES = 3;
 /** Reparto del progreso mostrado: el fetch es la parte lenta, el decode es CPU. */
 const FETCH_PROGRESS_SHARE = 0.6;
 
-/** Clase one-way en <html>: el contenido post-intro ya puede mostrarse. */
+/** Clase one-way en <html>: main/footer están en el flujo. */
 const REVEALED_CLASS = 'nb-content-revealed';
+/** Clase en <html>: la intro ya salió por arriba (muestra la barra del pedido). */
+const PAST_INTRO_CLASS = 'nb-past-intro';
+
+// --- TEMP DEBUG (iOS): añade ?nbdebug a la URL para ver una línea de
+// tiempo del skip en pantalla y en consola. Quitar cuando se cierre el bug.
+const NB_DEBUG = typeof window !== 'undefined' && /[?&]nbdebug/.test(window.location.search);
+let nbDebugT0 = 0;
+let nbDebugEl: HTMLPreElement | null = null;
+function nbMark(label: string, extra?: Record<string, unknown>) {
+  if (!NB_DEBUG) return;
+  const t = performance.now();
+  if (label === 'tap') nbDebugT0 = t;
+  const line = `${String(Math.round(t - nbDebugT0)).padStart(5)}ms ${label}${extra ? ' ' + JSON.stringify(extra) : ''}`;
+  console.log('[nb]', line);
+  if (!nbDebugEl) {
+    nbDebugEl = document.createElement('pre');
+    nbDebugEl.style.cssText =
+      'position:fixed;left:0;right:0;bottom:0;max-height:45vh;overflow:auto;margin:0;padding:6px 8px;background:rgba(0,0,0,.85);color:#0f0;font:10px/1.35 monospace;z-index:9999;pointer-events:none;white-space:pre-wrap';
+    document.body.appendChild(nbDebugEl);
+  }
+  nbDebugEl.textContent += line + '\n';
+  nbDebugEl.scrollTop = nbDebugEl.scrollHeight;
+}
+// --- /TEMP DEBUG
 
 /** Ancla post-intro: la sección Hero ("Tu antojo empieza aquí"). */
 const POST_INTRO_TARGET_ID = 'inicio';
@@ -233,11 +256,12 @@ export function MobileFrameSequenceIntro() {
   return <MobileFrameSequence />;
 }
 
-/** prefers-reduced-motion: sin secuencia; contenido y navbar visibles de inmediato. */
+/** prefers-reduced-motion: sin secuencia; contenido, barra y navbar visibles de inmediato. */
 function ReducedMotionIntro() {
   useEffect(() => {
     applyNavbar(LAST_INDEX);
     revealContent();
+    document.documentElement.classList.add(PAST_INTRO_CLASS);
   }, []);
   return null;
 }
@@ -262,13 +286,22 @@ function MobileFrameSequence() {
   const framesRef = useRef<Array<HTMLImageElement | null>>(new Array(TOTAL_FRAMES).fill(null));
   /** Último índice aplicado a badge/navbar (evita reescribir estilos si no cambia). */
   const appliedIndexRef = useRef(-1);
-  /** Un salto en curso: el render loop cede el control hasta que termina. */
-  const skipInFlightRef = useRef(false);
+  /** Último valor aplicado de `nb-past-intro`. */
+  const pastIntroRef = useRef<boolean | null>(null);
+
+  // --- Contenido post-intro en el flujo desde el montaje ------------------
+  // El loader tapa la pantalla; la página se maqueta y pinta 450vh más
+  // abajo mientras se descargan las frames. El destino del skip queda
+  // listo antes de que el botón exista.
+
+  useEffect(() => {
+    revealContent();
+    nbMark('mount: content revealed');
+  }, []);
 
   // --- Render: scroll real → progress → frame → pintar -----------------
 
   const render = useCallback(() => {
-    if (skipInFlightRef.current) return;
     const section = sectionRef.current;
     const sticky = stickyRef.current;
     const canvas = canvasRef.current;
@@ -297,7 +330,11 @@ function MobileFrameSequence() {
       applyNavbar(frameIndex);
     }
 
-    if (progress >= CONTENT_REVEAL_ON) revealContent();
+    if (pastIntroRef.current !== pastIntro) {
+      pastIntroRef.current = pastIntro;
+      document.documentElement.classList.toggle(PAST_INTRO_CLASS, pastIntro);
+      nbMark(pastIntro ? 'render: past intro' : 'render: inside intro', { scrollY: Math.round(window.scrollY), frameIndex });
+    }
   }, []);
 
   // --- Bitmap del canvas: sigue al tamaño CSS real (100dvh) ----------------
@@ -357,11 +394,13 @@ function MobileFrameSequence() {
       // el header y el hero ya están en el DOM (display:none) y sus <img>
       // son eager, así que se pueden decodificar ahora. Condiciones reales,
       // sin timeouts.
+      nbMark('loader: frames ready');
       await Promise.all([
         'fonts' in document ? document.fonts.ready.then(() => undefined, () => undefined) : Promise.resolve(),
-        decodePostIntroCriticalImages(),
+        decodePostIntroCriticalImages().then(() => nbMark('loader: destination images decoded')),
       ]);
       if (cancelled) return;
+      nbMark('loader: ready');
       setPhase('ready');
     })();
 
@@ -404,6 +443,9 @@ function MobileFrameSequence() {
     if (phase !== 'ready') return;
     let rafId = 0;
     function onScroll() {
+      if (NB_DEBUG && nbDebugT0 && performance.now() - nbDebugT0 < 4000) {
+        nbMark('scroll event', { scrollY: Math.round(window.scrollY) });
+      }
       if (rafId) return;
       rafId = window.requestAnimationFrame(() => {
         rafId = 0;
@@ -429,34 +471,29 @@ function MobileFrameSequence() {
   // --- Saltar intro: navegar, nada más -----------------------------------
 
   /**
-   *  1. candado (reentrada) + quitar el foco del botón (iOS "recentra" el
-   *     scroll sobre un botón enfocado cuya posición cambia);
-   *  2. revelar el contenido (no-op si ya está revelado);
-   *  3. siguiente frame: el layout del contenido revelado ya está asentado
-   *     y el ancla tiene su posición definitiva;
-   *  4. esperar a que las imágenes críticas del destino estén decodificadas
-   *     (promesa real; instantánea si siguen en memoria);
-   *  5. `scrollToSection('inicio')`: el mismo helper que usan todos los
+   * Síncrono y sin esperas: el destino ya está maquetado (reveal al montar)
+   * y sus imágenes decodificadas (loader).
+   *  1. quitar el foco del botón (iOS "recentra" el scroll sobre un botón
+   *     enfocado cuya posición cambia bajo el dedo);
+   *  2. `scrollToSection('inicio')`: el mismo helper que usan todos los
    *     enlaces internos del sitio (instantáneo en mobile, sin hash);
-   *  6. soltar el candado y dejar que `render()` refleje la nueva posición.
+   *  3. `render()`: navbar/badge/barra reflejan la nueva posición en el
+   *     mismo tick, sin esperar al evento de scroll.
    */
   const handleSkip = useCallback(() => {
-    if (skipInFlightRef.current) return;
-    skipInFlightRef.current = true;
+    nbMark('tap', { scrollY: Math.round(window.scrollY) });
     (document.activeElement as HTMLElement | null)?.blur?.();
-
-    revealContent();
-
-    window.requestAnimationFrame(() => {
-      decodePostIntroCriticalImages()
-        .then(() => {
-          scrollToSection(POST_INTRO_TARGET_ID);
-        })
-        .finally(() => {
-          skipInFlightRef.current = false;
-          render();
-        });
+    const target = document.getElementById(POST_INTRO_TARGET_ID);
+    nbMark('target', {
+      top: target ? Math.round(target.getBoundingClientRect().top) : null,
+      imgsComplete: Array.from(document.querySelectorAll<HTMLImageElement>(POST_INTRO_CRITICAL_IMAGES)).map((i) => i.complete),
     });
+    scrollToSection(POST_INTRO_TARGET_ID);
+    nbMark('after scroll', { scrollY: Math.round(window.scrollY) });
+    render();
+    if (NB_DEBUG) {
+      window.requestAnimationFrame(() => nbMark('next rAF', { scrollY: Math.round(window.scrollY) }));
+    }
   }, [render]);
 
   // ---------------------------------------------------------------------

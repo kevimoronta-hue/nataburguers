@@ -31,6 +31,10 @@ function withInstantScroll(fn: () => void) {
   const html = document.documentElement;
   const prev = html.style.scrollBehavior;
   html.style.scrollBehavior = 'auto';
+  // Fuerza el recálculo de estilo ANTES de desplazar: sin esto WebKit puede
+  // seguir usando el `scroll-behavior: smooth` cacheado del CSS y animar
+  // el salto (next/link hace exactamente lo mismo por el mismo motivo).
+  html.getClientRects();
   fn();
   html.style.scrollBehavior = prev;
 }
