@@ -4,14 +4,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
- * Intro de secuencia de frames — solo mobile (<=767px). React desmonta
- * MobileIntroActive al cruzar a desktop (limpia listeners/rAF solo).
- * El parpadeo inicial se evita con un @media puro en globals.css, sin
- * clase en <html>: nada que React tenga que reconciliar al hidratar.
+ * Secuencia de frames pilotada por scroll — EXCLUSIVA de mobile (<=767px).
+ * No existe versión desktop: en desktop este componente ni siquiera monta
+ * (ver MobileFrameSequenceIntro más abajo).
  *
- * Carga: /sequence-mobile/*.webp (900×1600, ~62KB/frame, ~12MB totales),
- * no los .jpg originales de /sequence/ (40MB, 1080×1920) — ver README de
- * la auditoría en el reporte de esta tarea.
+ * Arquitectura, simplificada a propósito tras detectar que un caché con
+ * ventana deslizante (decodificar/evictar bajo demanda durante el scroll)
+ * podía dejar frames sin decodificar a tiempo: ahora TODO se descarga y
+ * decodifica antes de soltar la experiencia. Cero red durante el scroll.
+ *
+ *  1. Preload: se hace fetch de las 193 (concurrencia limitada, con
+ *     reintentos), y LUEGO se decodifican las 193 (`new Image()` +
+ *     `.decode()`, concurrencia limitada). El loader no desaparece hasta
+ *     que las 193 están realmente decodificadas — no solo descargadas.
+ *  2. Render loop: un único listener de scroll → un único rAF → "leer
+ *     posición, calcular frame objetivo, pintar directamente esa frame
+ *     desde el array ya decodificado". Sin caché con ventana, sin cola de
+ *     prioridad, sin eviction: todo ya está listo, así que no hace falta.
+ *     La posición real de scroll es la única fuente de verdad
+ *     (latest-frame-wins): un fling nunca reproduce frames intermedias.
+ *  3. Fuente de imagen: `HTMLImageElement` (no `ImageBitmap`). A
+ *     diferencia de un ImageBitmap —que una vez creado ocupa su memoria
+ *     entera hasta que algo lo cierre explícitamente—, el backing store
+ *     decodificado de un <img> lo gestiona el propio motor del navegador,
+ *     que puede liberarlo bajo presión de memoria y volver a decodificarlo
+ *     al vuelo la próxima vez que se dibuja — sin red, porque los bytes ya
+ *     están servidos desde la cache HTTP. Con las 193 frames retenidas
+ *     permanentemente, esto es más seguro en memoria que 193 ImageBitmap
+ *     en bruto (~1,1 GB si nada los liberase nunca).
+ *  4. Anclaje: sticky + 100dvh (absorbe la barra dinámica de Safari a
+ *     nivel CSS) dentro de un spacer de altura fija en vh — sin JS para
+ *     el posicionamiento en sí.
  */
 
 const MOBILE_QUERY = '(max-width: 767px)';
@@ -32,74 +55,49 @@ export function MobileFrameSequenceIntro() {
 
   if (!isMobile) return null;
 
-  return <MobileIntroActive />;
+  return <MobileFrameSequence />;
 }
+
+// ---------------------------------------------------------------------------
+// Constantes
+// ---------------------------------------------------------------------------
 
 const TOTAL_FRAMES = 193;
 const LAST_INDEX = TOTAL_FRAMES - 1;
 const SCROLL_VH = 450;
-// Revela el contenido (main/footer/cartbar) — sin relación con la navbar.
+
+// Revela main/footer/cartbar al terminar la intro. Independiente de la navbar.
 const CONTENT_REVEAL_ON = 0.985;
 const CONTENT_REVEAL_OFF = 0.965;
-// Frame 168 → 184 (1-based, tal como las pidió el brief) en índice 0-based.
+
+// La navbar aparece sobre las últimas frames (168 → 184, 1-based).
 const NAVBAR_START_INDEX = 167;
 const NAVBAR_END_INDEX = 183;
 
-// --- Carga y memoria ---
-const FETCH_CONCURRENCY = 5;
+// Preload: dos fases secuenciales, cada una con su propia concurrencia.
+const FETCH_CONCURRENCY = 6;
+const DECODE_CONCURRENCY = 6;
 const MAX_RETRIES = 3;
-const PRIORITY_DECODE_COUNT = 10; // decodificadas de entrada: el scroll arranca fluido desde el frame 1
-const DECODE_WINDOW_BEFORE = 8;
-const DECODE_WINDOW_AFTER = 15;
+// Reparto del progreso mostrado entre "descargado" y "decodificado" — el
+// fetch es la parte más lenta/variable (depende de la red), el decode es
+// CPU pura y normalmente rápido.
+const FETCH_PROGRESS_SHARE = 0.6;
+
 const FONTS_READY_TIMEOUT_MS = 3000;
+
+// Un cambio de altura de viewport por debajo de esto es la barra de
+// Safari mostrándose/ocultándose durante el scroll, no un resize real.
+const RESIZE_MIN_HEIGHT_DELTA = 150;
 
 function frameSrc(oneBasedIndex: number) {
   return `/sequence-mobile/frame_${String(oneBasedIndex).padStart(6, '0')}.webp`;
 }
 
-/** Opacidad/transform/interactividad de la navbar según el frame actual (0-based). */
-function navbarVisual(frameIndex: number) {
-  const span = NAVBAR_END_INDEX - NAVBAR_START_INDEX;
-  const progress = Math.min(Math.max((frameIndex - NAVBAR_START_INDEX) / span, 0), 1);
-  return {
-    opacity: progress,
-    translateY: (1 - progress) * -12,
-    blur: (1 - progress) * 2,
-    interactive: progress >= 0.85,
-  };
-}
+// ---------------------------------------------------------------------------
+// Carga: fetch (red) → decode (<img>+.decode())
+// ---------------------------------------------------------------------------
 
-/** Opacidad/translación del badge según el frame actual (0-based). */
-function badgeVisual(frameIndex: number) {
-  if (frameIndex <= 7) return { opacity: 1, hidden: false };
-  if (frameIndex >= 9) return { opacity: 0, hidden: true };
-  const t = frameIndex - 7; // 0..2 → interpola entre frame 8 y frame 10
-  const opacity = 1 - t / 2;
-  return { opacity, hidden: opacity < 0.05 };
-}
-
-function drawFrame(
-  ctx: CanvasRenderingContext2D,
-  canvas: HTMLCanvasElement,
-  img: CanvasImageSource | null,
-  naturalWidth: number,
-  naturalHeight: number,
-) {
-  const cw = canvas.width;
-  const ch = canvas.height;
-  ctx.fillStyle = '#080706';
-  ctx.fillRect(0, 0, cw, ch);
-  if (!img || !naturalWidth || !naturalHeight) return;
-  // "contain": nunca recorta el burger ni el logo, respeta la composición.
-  const scale = Math.min(cw / naturalWidth, ch / naturalHeight);
-  const dw = naturalWidth * scale;
-  const dh = naturalHeight * scale;
-  const dx = (cw - dw) / 2;
-  const dy = (ch - dh) / 2;
-  ctx.drawImage(img, dx, dy, dw, dh);
-}
-
-/** Descarga con reintentos (hasta MAX_RETRIES). No decodifica: solo confirma 200 y llena la cache HTTP. */
+/** Descarga con reintentos. No decodifica: solo confirma 200 y llena la cache HTTP. */
 async function fetchWithRetry(url: string): Promise<boolean> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
     try {
@@ -112,17 +110,18 @@ async function fetchWithRetry(url: string): Promise<boolean> {
   return false;
 }
 
-/** Decodifica una imagen ya presente en la cache HTTP (rápido, sin red real). */
-function decodeImage(url: string): Promise<HTMLImageElement | null> {
+/** Decodifica una frame ya presente en la cache HTTP (rápido, sin red real). */
+function decodeFrame(url: string): Promise<HTMLImageElement | null> {
   return new Promise((resolve) => {
     const img = new Image();
-    img.decoding = 'async';
     img.onload = () => {
-      const finish = () => resolve(img);
       if (typeof img.decode === 'function') {
-        img.decode().then(finish).catch(finish);
+        img.decode().then(
+          () => resolve(img),
+          () => resolve(null),
+        );
       } else {
-        finish();
+        resolve(img);
       }
     };
     img.onerror = () => resolve(null);
@@ -130,12 +129,50 @@ function decodeImage(url: string): Promise<HTMLImageElement | null> {
   });
 }
 
-function MobileIntroActive() {
+function drawFrame(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, img: HTMLImageElement | null) {
+  const cw = canvas.width;
+  const ch = canvas.height;
+  ctx.fillStyle = '#080706';
+  ctx.fillRect(0, 0, cw, ch);
+  if (!img || !img.naturalWidth || !img.naturalHeight) return;
+  // "contain": nunca recorta el burger ni el logo.
+  const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
+  const dw = img.naturalWidth * scale;
+  const dh = img.naturalHeight * scale;
+  ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+}
+
+// ---------------------------------------------------------------------------
+// Visuales acopladas al frame index (navbar / badge)
+// ---------------------------------------------------------------------------
+
+function navbarVisual(frameIndex: number) {
+  const span = NAVBAR_END_INDEX - NAVBAR_START_INDEX;
+  const progress = Math.min(Math.max((frameIndex - NAVBAR_START_INDEX) / span, 0), 1);
+  return {
+    opacity: progress,
+    translateY: (1 - progress) * -12,
+    blur: (1 - progress) * 2,
+    interactive: progress >= 0.85,
+  };
+}
+
+function badgeVisual(frameIndex: number) {
+  if (frameIndex <= 7) return { opacity: 1, hidden: false };
+  if (frameIndex >= 9) return { opacity: 0, hidden: true };
+  const opacity = 1 - (frameIndex - 7) / 2;
+  return { opacity, hidden: opacity < 0.05 };
+}
+
+// ---------------------------------------------------------------------------
+// Componente
+// ---------------------------------------------------------------------------
+
+function MobileFrameSequence() {
   const [reducedMotion, setReducedMotion] = useState(false);
   const [reducedMotionReady, setReducedMotionReady] = useState(false);
   const [firstFrameReady, setFirstFrameReady] = useState(false);
 
-  // --- Loader bloqueante ---
   const [isExperienceReady, setIsExperienceReady] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -145,23 +182,16 @@ function MobileIntroActive() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const badgeRef = useRef<HTMLButtonElement | null>(null);
 
-  // Descargado (cache HTTP) vs decodificado (bitmap en memoria) — nunca lo mismo.
-  const fetchedSetRef = useRef<Set<number>>(new Set());
-  const decodedMapRef = useRef<Map<number, HTMLImageElement>>(new Map());
-  const decodingInFlightRef = useRef<Set<number>>(new Set());
-  // Única referencia persistente para el fallback de dibujo: nunca se
-  // expulsa por la ventana deslizante, así siempre hay algo que pintar.
-  const lastGoodImageRef = useRef<HTMLImageElement | null>(null);
+  // Única estructura de datos del motor: las 193 frames, en orden, ya
+  // decodificadas. Sin caché con ventana, sin eviction, sin cola.
+  const framesRef = useRef<Array<HTMLImageElement | null>>(new Array(TOTAL_FRAMES).fill(null));
   const lastGoodIndexRef = useRef(0);
 
   const skippingRef = useRef(false);
   const doneRef = useRef(false);
 
-  // Checklist de "experiencia lista" — isExperienceReady solo se activa
-  // cuando las seis condiciones son verdaderas, nunca por un timer.
   const readinessRef = useRef({
-    allFramesFetched: false,
-    initialFramesDecoded: false,
+    allFramesReady: false, // fetch + decode de las 193, completo
     logoReady: false,
     fontsReady: false,
     canvasReady: false,
@@ -170,14 +200,9 @@ function MobileIntroActive() {
 
   const checkReady = useCallback(() => {
     const r = readinessRef.current;
-    const ready =
-      r.allFramesFetched &&
-      r.initialFramesDecoded &&
-      r.logoReady &&
-      r.fontsReady &&
-      r.canvasReady &&
-      r.appHydrated;
-    if (ready) setIsExperienceReady(true);
+    if (r.allFramesReady && r.logoReady && r.fontsReady && r.canvasReady && r.appHydrated) {
+      setIsExperienceReady(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -191,11 +216,9 @@ function MobileIntroActive() {
     return () => mql.removeEventListener('change', apply);
   }, []);
 
-  const getCtx = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    return canvas.getContext('2d');
-  }, []);
+  // --- Canvas ---
+
+  const getCtx = useCallback(() => canvasRef.current?.getContext('2d') ?? null, []);
 
   const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -213,31 +236,11 @@ function MobileIntroActive() {
     const ctx = getCtx();
     const canvas = canvasRef.current;
     if (!ctx || !canvas) return;
-    const img = decodedMapRef.current.get(lastGoodIndexRef.current) ?? lastGoodImageRef.current;
-    drawFrame(ctx, canvas, img, img?.naturalWidth ?? 0, img?.naturalHeight ?? 0);
+    drawFrame(ctx, canvas, framesRef.current[lastGoodIndexRef.current]);
   }, [getCtx]);
 
-  /** Descarta del mapa lo que quede lejos del frame activo y decodifica lo que falte dentro de la ventana. */
-  const ensureDecodeWindow = useCallback((centerIndex: number) => {
-    const from = Math.max(0, centerIndex - DECODE_WINDOW_BEFORE);
-    const to = Math.min(LAST_INDEX, centerIndex + DECODE_WINDOW_AFTER);
+  // --- Preparación: hidratación, logo, fuentes, canvas ---
 
-    for (const key of Array.from(decodedMapRef.current.keys())) {
-      if (key < from || key > to) decodedMapRef.current.delete(key);
-    }
-
-    for (let i = from; i <= to; i += 1) {
-      if (decodedMapRef.current.has(i) || decodingInFlightRef.current.has(i)) continue;
-      if (!fetchedSetRef.current.has(i)) continue;
-      decodingInFlightRef.current.add(i);
-      decodeImage(frameSrc(i + 1)).then((img) => {
-        decodingInFlightRef.current.delete(i);
-        if (img) decodedMapRef.current.set(i, img);
-      });
-    }
-  }, []);
-
-  // --- Precarga: appHydrated, logo, fuentes, canvas ---
   useEffect(() => {
     readinessRef.current.appHydrated = true;
     checkReady();
@@ -245,15 +248,12 @@ function MobileIntroActive() {
 
   useEffect(() => {
     const img = new Image();
-    img.onload = () => {
+    const settle = () => {
       readinessRef.current.logoReady = true;
       checkReady();
     };
-    img.onerror = () => {
-      // No bloquear indefinidamente por un logo que nunca llegará.
-      readinessRef.current.logoReady = true;
-      checkReady();
-    };
+    img.onload = settle;
+    img.onerror = settle; // no bloquear indefinidamente por un logo que nunca llega
     img.src = '/nata-burgers-logo.png';
   }, [checkReady]);
 
@@ -265,11 +265,8 @@ function MobileIntroActive() {
       readinessRef.current.fontsReady = true;
       checkReady();
     };
-    if (typeof document !== 'undefined' && 'fonts' in document) {
-      document.fonts.ready.then(settle).catch(settle);
-    } else {
-      settle();
-    }
+    if (typeof document !== 'undefined' && 'fonts' in document) document.fonts.ready.then(settle).catch(settle);
+    else settle();
     const timeout = window.setTimeout(settle, FONTS_READY_TIMEOUT_MS);
     return () => window.clearTimeout(timeout);
   }, [checkReady]);
@@ -281,64 +278,70 @@ function MobileIntroActive() {
     checkReady();
   }, [reducedMotion, resizeCanvas, checkReady]);
 
-  // --- Descarga con concurrencia limitada + decodificación prioritaria ---
+  // --- Preload completo: fetch de las 193 → decode de las 193 ---
+  // El loader no suelta la experiencia hasta que TODAS están realmente
+  // decodificadas (no solo descargadas). Cero red durante el scroll.
+
   useEffect(() => {
     if (!reducedMotionReady || reducedMotion) return;
     let cancelled = false;
     setLoadFailed(false);
 
     (async () => {
-      // Frame 1 primero, en solitario: es lo primero que se ve tras el loader.
-      const firstOk = await fetchWithRetry(frameSrc(1));
-      if (cancelled) return;
-      if (!firstOk) {
-        setLoadFailed(true);
-        return;
-      }
-      fetchedSetRef.current.add(0);
-      setLoadProgress(Math.round((1 / TOTAL_FRAMES) * 100));
-      const firstImg = await decodeImage(frameSrc(1));
-      if (cancelled) return;
-      if (firstImg) {
-        decodedMapRef.current.set(0, firstImg);
-        lastGoodImageRef.current = firstImg;
-        lastGoodIndexRef.current = 0;
-        setFirstFrameReady(true);
-        redrawCurrent();
-      }
+      // Fase 1: descarga de las 193, concurrencia limitada, con reintentos.
+      const allIndices = Array.from({ length: TOTAL_FRAMES }, (_, i) => i);
+      let fetchCursor = 0;
+      let fetchedCount = 0;
+      let failed = false;
 
-      // Resto de la cola: concurrencia limitada, prioridad a las primeras.
-      const remaining = Array.from({ length: TOTAL_FRAMES - 1 }, (_, i) => i + 1);
-      let cursor = 0;
-      let failedAny = false;
-      let fetchedCount = 1;
-
-      async function worker() {
-        while (!cancelled && cursor < remaining.length && !failedAny) {
-          const idx = remaining[cursor];
-          cursor += 1;
+      async function fetchWorker() {
+        while (!cancelled && !failed && fetchCursor < allIndices.length) {
+          const idx = allIndices[fetchCursor];
+          fetchCursor += 1;
           const ok = await fetchWithRetry(frameSrc(idx + 1));
           if (cancelled) return;
           if (!ok) {
-            failedAny = true;
+            failed = true;
             setLoadFailed(true);
             return;
           }
-          fetchedSetRef.current.add(idx);
           fetchedCount += 1;
-          setLoadProgress(Math.round((fetchedCount / TOTAL_FRAMES) * 100));
-          if (idx < PRIORITY_DECODE_COUNT) {
-            const img = await decodeImage(frameSrc(idx + 1));
-            if (!cancelled && img) decodedMapRef.current.set(idx, img);
+          setLoadProgress(Math.round((fetchedCount / TOTAL_FRAMES) * FETCH_PROGRESS_SHARE * 100));
+        }
+      }
+      await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, fetchWorker));
+      if (cancelled || failed) return;
+
+      // Fase 2: decodificación de las 193 (ya en cache HTTP, sin red real).
+      let decodeCursor = 0;
+      let decodedCount = 0;
+
+      async function decodeWorker() {
+        while (!cancelled && !failed && decodeCursor < allIndices.length) {
+          const idx = allIndices[decodeCursor];
+          decodeCursor += 1;
+          const img = await decodeFrame(frameSrc(idx + 1));
+          if (cancelled) return;
+          if (!img) {
+            failed = true;
+            setLoadFailed(true);
+            return;
+          }
+          framesRef.current[idx] = img;
+          decodedCount += 1;
+          const pct = FETCH_PROGRESS_SHARE + (decodedCount / TOTAL_FRAMES) * (1 - FETCH_PROGRESS_SHARE);
+          setLoadProgress(Math.round(pct * 100));
+          if (idx === 0) {
+            lastGoodIndexRef.current = 0;
+            setFirstFrameReady(true);
+            redrawCurrent();
           }
         }
       }
+      await Promise.all(Array.from({ length: DECODE_CONCURRENCY }, decodeWorker));
+      if (cancelled || failed) return;
 
-      await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, worker));
-      if (cancelled || failedAny) return;
-
-      readinessRef.current.allFramesFetched = true;
-      readinessRef.current.initialFramesDecoded = true;
+      readinessRef.current.allFramesReady = true;
       checkReady();
     })();
 
@@ -349,48 +352,38 @@ function MobileIntroActive() {
   }, [reducedMotionReady, reducedMotion, retryTick]);
 
   const handleRetryLoad = useCallback(() => {
-    fetchedSetRef.current.clear();
-    decodedMapRef.current.clear();
-    lastGoodImageRef.current = null;
+    framesRef.current = new Array(TOTAL_FRAMES).fill(null);
     lastGoodIndexRef.current = 0;
+    readinessRef.current.allFramesReady = false;
     setFirstFrameReady(false);
     setLoadProgress(0);
     setLoadFailed(false);
     setRetryTick((n) => n + 1);
   }, []);
 
-  // Bloquea el scroll de la página mientras el loader está activo: nada
-  // debe avanzar, ni el badge ni la navbar deben aparecer todavía.
+  // Bloquea el scroll de la página mientras el loader está activo.
   useEffect(() => {
-    if (reducedMotion) return;
-    if (isExperienceReady) return;
+    if (reducedMotion || isExperienceReady) return;
     const { body } = document;
-    const prevOverflow = body.style.overflow;
-    const prevPosition = body.style.position;
-    const prevWidth = body.style.width;
+    const prev = { overflow: body.style.overflow, position: body.style.position, width: body.style.width };
     body.style.overflow = 'hidden';
     body.style.position = 'fixed';
     body.style.width = '100%';
     return () => {
-      body.style.overflow = prevOverflow;
-      body.style.position = prevPosition;
-      body.style.width = prevWidth;
+      body.style.overflow = prev.overflow;
+      body.style.position = prev.position;
+      body.style.width = prev.width;
     };
   }, [reducedMotion, isExperienceReady]);
 
-  /** Revela main/footer/cartbar. La navbar YA NO depende de esto. */
+  /** Revela main/footer/cartbar. La navbar no depende de esto. */
   const setContentRevealed = useCallback((done: boolean) => {
     if (doneRef.current === done) return;
     doneRef.current = done;
     document.documentElement.classList.toggle('nb-intro-done', done);
   }, []);
 
-  /**
-   * Estilo inline directo, sin transición CSS: la navbar debe reflejar el
-   * frame actual al instante, igual que el canvas. Cualquier transición
-   * temporal aquí reintroduciría el "sigue moviéndose solo" que el fix
-   * de scroll-only busca eliminar.
-   */
+  /** Estilo inline directo, sin transición CSS: debe reflejar el frame actual al instante. */
   const updateNavbar = useCallback((frameIndex: number) => {
     const header = document.querySelector<HTMLElement>('.site-header');
     if (!header) return;
@@ -417,15 +410,17 @@ function MobileIntroActive() {
     }
   }, []);
 
-  // Bucle de scroll → progreso → frame. Nunca secuestra el gesto: solo lee
-  // la posición real del scroll dentro de la sección. No se activa hasta
-  // que la experiencia está lista: antes de eso no hay nada que leer.
+  // --- Render loop: leer posición → progreso → frame objetivo → pintar ---
+  // Todas las frames ya están decodificadas: pintar es una simple lectura
+  // de array, nunca depende de una decodificación en curso.
+
   useEffect(() => {
     if (!reducedMotionReady || reducedMotion || !isExperienceReady) return;
 
-    const canvas = canvasRef.current;
+    const maybeCanvas = canvasRef.current;
     const maybeCtx = getCtx();
-    if (!canvas || !maybeCtx) return;
+    if (!maybeCanvas || !maybeCtx) return;
+    const canvas = maybeCanvas;
     const ctx = maybeCtx;
 
     let ticking = false;
@@ -435,10 +430,9 @@ function MobileIntroActive() {
       const section = sectionRef.current;
       if (!section) return 0;
       const rect = section.getBoundingClientRect();
-      const scrollableRange = section.offsetHeight - window.innerHeight;
-      if (scrollableRange <= 0) return 1;
-      const scrolled = -rect.top;
-      return Math.min(Math.max(scrolled / scrollableRange, 0), 1);
+      const scrollable = section.offsetHeight - window.innerHeight;
+      if (scrollable <= 0) return 1;
+      return Math.min(Math.max(-rect.top / scrollable, 0), 1);
     }
 
     function tick() {
@@ -447,10 +441,7 @@ function MobileIntroActive() {
 
       const section = sectionRef.current;
       if (section && section.getBoundingClientRect().bottom <= 0) {
-        // El usuario ya salió de la zona de la intro por scroll normal:
-        // evita redibujar un canvas que ya no es visible. La navbar ya
-        // quedó en su estado final antes de llegar aquí; no se toca de
-        // nuevo (nunca se apaga y se re-enciende una segunda vez).
+        // Ya salió de la zona de la intro: no hay nada más que pintar.
         setContentRevealed(true);
         return;
       }
@@ -458,22 +449,16 @@ function MobileIntroActive() {
       const progress = computeProgress();
       const frameIndex = Math.min(Math.max(Math.round(progress * LAST_INDEX), 0), LAST_INDEX);
 
-      ensureDecodeWindow(frameIndex);
-
-      const img = decodedMapRef.current.get(frameIndex);
+      // Latest-frame-wins: se pinta directamente la frame que corresponde
+      // a la posición actual. No hay frames intermedias que "reproducir".
+      const img = framesRef.current[frameIndex];
       if (img) {
         lastGoodIndexRef.current = frameIndex;
-        lastGoodImageRef.current = img;
-        drawFrame(ctx, canvas as HTMLCanvasElement, img, img.naturalWidth, img.naturalHeight);
+        drawFrame(ctx, canvas, img);
       } else {
-        const fallback = lastGoodImageRef.current;
-        drawFrame(
-          ctx,
-          canvas as HTMLCanvasElement,
-          fallback,
-          fallback?.naturalWidth ?? 0,
-          fallback?.naturalHeight ?? 0,
-        );
+        // No debería pasar (todo se precargó), pero por si un frame
+        // puntual falló: se mantiene la última válida, nunca vacío/negro.
+        drawFrame(ctx, canvas, framesRef.current[lastGoodIndexRef.current]);
       }
 
       updateBadge(frameIndex);
@@ -495,44 +480,53 @@ function MobileIntroActive() {
       window.removeEventListener('scroll', onScroll);
       if (rafId) window.cancelAnimationFrame(rafId);
     };
-  }, [
-    reducedMotionReady,
-    reducedMotion,
-    isExperienceReady,
-    getCtx,
-    updateBadge,
-    updateNavbar,
-    setContentRevealed,
-    ensureDecodeWindow,
-  ]);
+  }, [reducedMotionReady, reducedMotion, isExperienceReady, getCtx, updateBadge, updateNavbar, setContentRevealed]);
 
-  // Resize / cambio de orientación: recalcula el canvas sin estirar la imagen.
+  // --- Resize / orientación ---
+  // 100dvh ya absorbe la barra dinámica de Safari a nivel CSS. Aquí solo
+  // hace falta reaccionar a un cambio *real* de tamaño.
+
   useEffect(() => {
     if (!reducedMotionReady || reducedMotion) return;
     let rafId = 0;
-    function onResize() {
-      if (rafId) window.cancelAnimationFrame(rafId);
-      rafId = window.requestAnimationFrame(() => {
-        resizeCanvas();
-        redrawCurrent();
-      });
+    let lastWidth = window.innerWidth;
+    let lastHeight = window.innerHeight;
+
+    function apply() {
+      lastWidth = window.innerWidth;
+      lastHeight = window.innerHeight;
+      resizeCanvas();
+      redrawCurrent();
     }
+
+    function scheduleApply() {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(apply);
+    }
+
+    function onResize() {
+      const widthChanged = window.innerWidth !== lastWidth;
+      const heightDelta = Math.abs(window.innerHeight - lastHeight);
+      if (!widthChanged && heightDelta < RESIZE_MIN_HEIGHT_DELTA) return; // barra de Safari, se ignora
+      scheduleApply();
+    }
+
     window.addEventListener('resize', onResize);
-    window.addEventListener('orientationchange', onResize);
+    window.addEventListener('orientationchange', scheduleApply);
     return () => {
       window.removeEventListener('resize', onResize);
-      window.removeEventListener('orientationchange', onResize);
+      window.removeEventListener('orientationchange', scheduleApply);
       if (rafId) window.cancelAnimationFrame(rafId);
     };
   }, [reducedMotionReady, reducedMotion, resizeCanvas, redrawCurrent]);
 
-  // Modo prefers-reduced-motion: sin scroll forzado, acceso inmediato.
+  // --- prefers-reduced-motion: sin scroll forzado ---
+
   useEffect(() => {
     if (!reducedMotionReady || !reducedMotion) return;
     let cancelled = false;
-    decodeImage(frameSrc(1)).then((img) => {
-      if (cancelled || !img) return;
-      setFirstFrameReady(true);
+    decodeFrame(frameSrc(1)).then((img) => {
+      if (!cancelled && img) setFirstFrameReady(true);
     });
     const timer = window.setTimeout(() => {
       if (cancelled) return;
@@ -545,6 +539,14 @@ function MobileIntroActive() {
     };
   }, [reducedMotionReady, reducedMotion, updateNavbar, setContentRevealed]);
 
+  // --- Limpieza al desmontar ---
+
+  useEffect(() => {
+    return () => {
+      framesRef.current = new Array(TOTAL_FRAMES).fill(null);
+    };
+  }, []);
+
   const handleSkip = useCallback(() => {
     if (skippingRef.current || doneRef.current) return;
     skippingRef.current = true;
@@ -552,27 +554,20 @@ function MobileIntroActive() {
     const canvas = canvasRef.current;
     const ctx = getCtx();
     if (canvas && ctx) {
-      const last = decodedMapRef.current.get(LAST_INDEX) ?? lastGoodImageRef.current;
-      drawFrame(ctx, canvas, last, last?.naturalWidth ?? 0, last?.naturalHeight ?? 0);
+      const last = framesRef.current[LAST_INDEX] ?? framesRef.current[lastGoodIndexRef.current];
+      drawFrame(ctx, canvas, last);
       lastGoodIndexRef.current = LAST_INDEX;
-      if (last) lastGoodImageRef.current = last;
       updateBadge(LAST_INDEX);
     }
-    // Estado final mostrado ya: la navbar no repite su propia animación de
-    // entrada, y el contenido se revela antes de mover el scroll (si no,
-    // main sigue en display:none y scrollIntoView no tiene nada que medir).
     updateNavbar(LAST_INDEX);
     setContentRevealed(true);
 
     window.requestAnimationFrame(() => {
       const target = document.getElementById('main-content');
       if (target) {
-        // scrollIntoView({behavior:'auto'}) hereda `scroll-behavior` del
-        // <html>, que aquí es `smooth` — forzarlo a 'auto' evita que el
-        // salto recorra visualmente la intro en vez de ser instantáneo.
         const html = document.documentElement;
         const prevScrollBehavior = html.style.scrollBehavior;
-        html.style.scrollBehavior = 'auto';
+        html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
         target.scrollIntoView({ behavior: 'auto', block: 'start' });
         html.style.scrollBehavior = prevScrollBehavior;
       }
@@ -582,12 +577,15 @@ function MobileIntroActive() {
     });
   }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
 
+  // ---------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------
+
   if (reducedMotionReady && reducedMotion) {
     return (
       <div className="nb-intro-overlay nb-intro-overlay--static" aria-hidden="true">
         <div className="nb-intro-static-frame">
           {firstFrameReady ? (
-            // eslint-disable-next-line @next/next/no-img-element
             <img src={frameSrc(1)} alt="" />
           ) : (
             <div className="nb-intro-loader">
@@ -631,31 +629,46 @@ function MobileIntroActive() {
           </div>
 
           {isExperienceReady ? (
-            <button
-              ref={badgeRef}
-              type="button"
-              className="nb-intro-skip"
-              onClick={handleSkip}
-              aria-label="Saltar la introducción"
-            >
-              Saltar intro
-              <svg
-                className="nb-intro-skip-arrow"
-                width="12"
-                height="12"
-                viewBox="0 0 12 12"
-                fill="none"
-                aria-hidden="true"
+            <>
+              <button
+                ref={badgeRef}
+                type="button"
+                className="nb-intro-skip"
+                onClick={handleSkip}
+                aria-label="Saltar la introducción"
               >
-                <path
-                  d="M2.5 4.5L6 8l3.5-3.5"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
+                Saltar intro
+                <svg
+                  className="nb-intro-skip-arrow"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M2.5 4.5L6 8l3.5-3.5"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+
+              <span className="nb-intro-swipe-hint" aria-hidden="true">
+                Desliza
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <path
+                    d="M2 4l3 3 3-3"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+            </>
           ) : null}
         </div>
       </div>

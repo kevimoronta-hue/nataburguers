@@ -209,6 +209,46 @@
   outline-offset: 2px;
 }
 
+/*
+ * Pista de swipe discreta, en overlay directo sobre la imagen (no debajo,
+ * no en una franja separada): posicionada respecto al propio `.nb-intro-
+ * sticky` (100dvh), así queda dentro de la escena sin añadir altura al
+ * layout ni depender del canvas.
+ */
+.nb-intro-swipe-hint {
+  position: absolute;
+  left: 50%;
+  bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #fff1d6;
+  opacity: 0.55;
+  font-family: theme('fontFamily.ui');
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  animation: nb-swipe-hint-bob 2s ease-in-out infinite;
+}
+
+@keyframes nb-swipe-hint-bob {
+  0%, 100% {
+    transform: translateX(-50%) translateY(0);
+  }
+  50% {
+    transform: translateX(-50%) translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nb-intro-swipe-hint {
+    animation: none;
+  }
+}
+
 .nb-intro-loader-track {
   width: 36px;
   height: 3px;
