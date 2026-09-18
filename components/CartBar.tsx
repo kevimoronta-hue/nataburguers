@@ -1,46 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'react';
 import { Button } from '@/components/Button';
 import { formatPrice, useCart } from '@/lib/cart';
 import { track } from '@/lib/analytics';
 
 /**
- * Distancia entre el borde inferior del viewport de layout y el del
- * viewport visual: en iOS Safari, la barra inferior del navegador (no la
- * navbar del sitio) resta altura al viewport VISUAL sin cambiar el
- * viewport de LAYOUT, así que un `position: fixed; bottom: 0` normal
- * termina anclado detrás de esa barra mientras está visible.
- * `env(safe-area-inset-bottom)` no cubre este caso: solo compensa el
- * home indicator, no la barra de Safari mostrándose/ocultándose.
+ * Barra fija inferior. Misma mecánica en Android e iOS: `bottom: 0` +
+ * `env(safe-area-inset-bottom)` en el padding. Sin JS de viewport: en
+ * iOS la barra dinámica de Safari reduce el viewport de layout, así que
+ * un `fixed; bottom: 0` ya queda por encima de ella; leer visualViewport
+ * solo hacía saltar la barra durante la animación de la toolbar.
  */
-function useSafariBottomBarGap() {
-  const [gap, setGap] = useState(0);
-
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-
-    function update() {
-      const offset = window.innerHeight - vv!.height - vv!.offsetTop;
-      setGap(Math.max(0, Math.round(offset)));
-    }
-
-    update();
-    vv.addEventListener('resize', update);
-    vv.addEventListener('scroll', update);
-    return () => {
-      vv.removeEventListener('resize', update);
-      vv.removeEventListener('scroll', update);
-    };
-  }, []);
-
-  return gap;
-}
-
 export function CartBar() {
   const { count, total, openCart, isOpen, ready } = useCart();
-  const safariGap = useSafariBottomBarGap();
 
   if (!ready || count === 0 || isOpen) return null;
 
@@ -51,8 +23,7 @@ export function CartBar() {
 
   return (
     <div
-      className="site-cartbar fixed inset-x-0 z-cartbar px-0 lg:hidden"
-      style={{ bottom: safariGap }}
+      className="site-cartbar fixed inset-x-0 bottom-0 z-cartbar px-0 lg:hidden"
       role="region"
       aria-label="Resumen del pedido"
     >

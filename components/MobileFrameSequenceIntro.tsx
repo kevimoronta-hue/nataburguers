@@ -2,6 +2,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { FrameCache, type FrameSource } from '@/lib/frame-cache';
 import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
 
 /**
@@ -14,6 +15,14 @@ import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
  *    scroll → progress → frame index → drawImage. Sin estado histórico
  *    que decida la frame: ni "saltado", ni "terminado", ni "segundo
  *    pase". Subir = frames hacia atrás; bajar = frames hacia delante.
+ *
+ *  MEMORIA — las 193 frames se descargan una vez (cache HTTP), pero solo
+ *    una ventana de ~23 frames alrededor del objetivo está decodificada
+ *    (ImageBitmap, ~130 MB máx.), con más margen en la dirección del
+ *    scroll. Lo que sale de la ventana se cierra en el acto. Si la frame
+ *    exacta aún no está lista se pinta la decodificada más cercana y se
+ *    sustituye en cuanto llega (latest-position-wins, nunca vacío). Ver
+ *    lib/frame-cache.ts. Mismo motor en Android e iOS.
  *
  *  ANCLAJE — 100 % CSS: un spacer de 450vh con un hijo sticky de 100dvh.
  *    `vh` (viewport grande, constante) fija la longitud del recorrido y
@@ -33,9 +42,10 @@ import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
  *    imágenes decodificadas (loader). Idempotente: cada clic ejecuta
  *    exactamente lo mismo, sea cual sea la frame o el historial.
  *
- *  LOADER — antes de soltar la experiencia: 193 frames descargadas y
- *    decodificadas, fuentes listas, imágenes visibles al aterrizar tras el
- *    skip (logo del header, burger del Hero) decodificadas.
+ *  LOADER — antes de soltar la experiencia: 193 frames descargadas
+ *    (cache HTTP), primera ventana decodificada, fuentes listas, imágenes
+ *    visibles al aterrizar tras el skip (logo del header, burger del Hero)
+ *    decodificadas.
  */
 
 // ---------------------------------------------------------------------------
@@ -54,10 +64,14 @@ const NAVBAR_START_INDEX = 167;
 const NAVBAR_END_INDEX = 183;
 
 const FETCH_CONCURRENCY = 6;
-const DECODE_CONCURRENCY = 6;
 const MAX_RETRIES = 3;
-/** Reparto del progreso mostrado: el fetch es la parte lenta, el decode es CPU. */
-const FETCH_PROGRESS_SHARE = 0.6;
+/** Reparto del progreso mostrado: el fetch (red) y luego la primera ventana (decode). */
+const FETCH_PROGRESS_SHARE = 0.85;
+
+/** Ventana decodificada: objetivo + 8 detrás + 14 delante (en la dirección del scroll). */
+const WINDOW_BEHIND = 8;
+const WINDOW_AHEAD = 14;
+const DECODE_CONCURRENCY = 4;
 
 /** Clase one-way en <html>: main/footer están en el flujo. */
 const REVEALED_CLASS = 'nb-content-revealed';
@@ -125,19 +139,6 @@ async function fetchWithRetry(url: string): Promise<boolean> {
   return false;
 }
 
-/** Decodifica una frame ya presente en la cache HTTP. */
-function decodeFrame(url: string): Promise<HTMLImageElement | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      if (typeof img.decode === 'function') img.decode().then(() => resolve(img), () => resolve(null));
-      else resolve(img);
-    };
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
-}
-
 /** Ejecuta `work(i)` para i en [0, count) con concurrencia limitada. Devuelve false si alguna falla. */
 async function runPool(count: number, concurrency: number, work: (i: number) => Promise<boolean>) {
   let cursor = 0;
@@ -169,19 +170,27 @@ function decodePostIntroCriticalImages(): Promise<void> {
   return Promise.all(imgs.map(whenImageDecoded)).then(() => undefined);
 }
 
-function drawFrame(canvas: HTMLCanvasElement, img: HTMLImageElement | null) {
+function frameSize(frame: FrameSource) {
+  return 'naturalWidth' in frame
+    ? { w: frame.naturalWidth, h: frame.naturalHeight }
+    : { w: frame.width, h: frame.height };
+}
+
+/** Pinta `frame` en "contain" (nunca recorta el burger ni el logo). Sin frame, no toca el canvas. */
+function drawFrame(canvas: HTMLCanvasElement, frame: FrameSource | null) {
+  if (!frame) return;
+  const { w, h } = frameSize(frame);
+  if (!w || !h) return;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const cw = canvas.width;
   const ch = canvas.height;
   ctx.fillStyle = '#080706';
   ctx.fillRect(0, 0, cw, ch);
-  if (!img || !img.naturalWidth || !img.naturalHeight) return;
-  // "contain": nunca recorta el burger ni el logo.
-  const scale = Math.min(cw / img.naturalWidth, ch / img.naturalHeight);
-  const dw = img.naturalWidth * scale;
-  const dh = img.naturalHeight * scale;
-  ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+  const scale = Math.min(cw / w, ch / h);
+  const dw = w * scale;
+  const dh = h * scale;
+  ctx.drawImage(frame, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
 }
 
 /** Bitmap del canvas = tamaño CSS real (100 % del sticky en dvh) × DPR (cap 2). */
@@ -282,12 +291,18 @@ function MobileFrameSequence() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const badgeRef = useRef<HTMLButtonElement | null>(null);
 
-  /** Las 193 frames decodificadas, en orden. Única estructura del motor. */
-  const framesRef = useRef<Array<HTMLImageElement | null>>(new Array(TOTAL_FRAMES).fill(null));
+  /** Ventana de frames decodificadas (ver lib/frame-cache.ts). Se crea en el loader. */
+  const cacheRef = useRef<FrameCache | null>(null);
+  /** Frame objetivo actual (según el scroll) y frame realmente pintada. */
+  const targetIndexRef = useRef(0);
+  const drawnIndexRef = useRef(-1);
   /** Último índice aplicado a badge/navbar (evita reescribir estilos si no cambia). */
   const appliedIndexRef = useRef(-1);
   /** Último valor aplicado de `nb-past-intro`. */
   const pastIntroRef = useRef<boolean | null>(null);
+  /** rAF pendiente para repintar cuando llega una frame que faltaba. */
+  const repaintRafRef = useRef(0);
+  const lastMissLogRef = useRef(0);
 
   // --- Contenido post-intro en el flujo desde el montaje ------------------
   // El loader tapa la pantalla; la página se maqueta y pinta 450vh más
@@ -319,10 +334,30 @@ function MobileFrameSequence() {
       progress = scrollable > 0 ? clamp01(-rect.top / scrollable) : 1;
     }
     const frameIndex = Math.round(progress * LAST_INDEX);
+    targetIndexRef.current = frameIndex;
 
-    // Con el canvas fuera de pantalla no hay nada que pintar. Dentro, se
-    // pinta siempre la frame de la posición actual (latest-frame-wins).
-    if (!pastIntro) drawFrame(canvas, framesRef.current[frameIndex]);
+    // La ventana decodificada sigue al objetivo (latest-position-wins: un
+    // fling reprioriza la cola, no reproduce frames intermedias).
+    const cache = cacheRef.current;
+    cache?.setTarget(frameIndex);
+
+    // Con el canvas fuera de pantalla no hay nada que pintar. Dentro: la
+    // frame exacta si está decodificada; si no, la decodificada más
+    // cercana (nunca vacío/negro), y se sustituye cuando llega la exacta.
+    if (!pastIntro && cache) {
+      const best = cache.nearest(frameIndex);
+      if (best && best.index !== drawnIndexRef.current) {
+        drawFrame(canvas, best.frame);
+        drawnIndexRef.current = best.index;
+      }
+      if (NB_DEBUG && (!best || best.index !== frameIndex)) {
+        const now = performance.now();
+        if (now - lastMissLogRef.current > 250) {
+          lastMissLogRef.current = now;
+          nbMark('frame miss', { want: frameIndex, drawn: best?.index ?? null, ...cache.stats() });
+        }
+      }
+    }
 
     if (appliedIndexRef.current !== frameIndex) {
       appliedIndexRef.current = frameIndex;
@@ -343,11 +378,27 @@ function MobileFrameSequence() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ro = new ResizeObserver(() => {
-      if (sizeCanvasBitmap(canvas)) render(); // cambiar width/height borra el canvas
+      if (sizeCanvasBitmap(canvas)) {
+        drawnIndexRef.current = -1; // cambiar width/height borra el canvas
+        render();
+      }
     });
     ro.observe(canvas);
     return () => ro.disconnect();
   }, [render]);
+
+  /** Una frame que faltaba acaba de llegar: si es la que toca, repintar en el próximo frame. */
+  const onFrameReady = useCallback(
+    (index: number) => {
+      if (index !== targetIndexRef.current || drawnIndexRef.current === index) return;
+      if (repaintRafRef.current) return;
+      repaintRafRef.current = window.requestAnimationFrame(() => {
+        repaintRafRef.current = 0;
+        render();
+      });
+    },
+    [render],
+  );
 
   // --- Loader: frames + fuentes + destino del skip -----------------------
 
@@ -356,7 +407,21 @@ function MobileFrameSequence() {
     setPhase('loading');
     setLoadProgress(0);
 
+    // Cache decodificada de esta carga. Se cierra entera al desmontar o al
+    // reintentar (cleanup del efecto).
+    const cache = new FrameCache({
+      total: TOTAL_FRAMES,
+      src: (i) => frameSrc(i + 1),
+      behind: WINDOW_BEHIND,
+      ahead: WINDOW_AHEAD,
+      concurrency: DECODE_CONCURRENCY,
+      onFrameReady,
+    });
+    cacheRef.current = cache;
+    drawnIndexRef.current = -1;
+
     (async () => {
+      // 1) Red: las 193 a la cache HTTP. Sin decodificar.
       let fetched = 0;
       const fetchedAll = await runPool(TOTAL_FRAMES, FETCH_CONCURRENCY, async (i) => {
         const ok = await fetchWithRetry(frameSrc(i + 1));
@@ -372,45 +437,44 @@ function MobileFrameSequence() {
         setPhase('failed');
         return;
       }
+      nbMark('loader: network cache ready');
 
-      let decoded = 0;
-      const decodedAll = await runPool(TOTAL_FRAMES, DECODE_CONCURRENCY, async (i) => {
-        const img = await decodeFrame(frameSrc(i + 1));
-        if (cancelled) return false;
-        if (!img) return false;
-        framesRef.current[i] = img;
-        decoded += 1;
-        const pct = FETCH_PROGRESS_SHARE + (decoded / TOTAL_FRAMES) * (1 - FETCH_PROGRESS_SHARE);
-        setLoadProgress(Math.round(pct * 100));
-        return true;
-      });
+      // 2) Decodificar solo la primera ventana (objetivo 0 + 14 delante).
+      cache.setTarget(0);
+      await cache.whenIdle();
       if (cancelled) return;
-      if (!decodedAll) {
-        setPhase('failed');
+      if (!cache.get(0)) {
+        setPhase('failed'); // sin primera frame no hay intro que mostrar
         return;
       }
+      setLoadProgress(Math.round(FETCH_PROGRESS_SHARE * 100 + 10));
+      nbMark('loader: first window decoded', cache.stats());
 
-      // Fuentes (loader y hero) + imágenes críticas del destino del skip:
-      // el header y el hero ya están en el DOM (display:none) y sus <img>
-      // son eager, así que se pueden decodificar ahora. Condiciones reales,
-      // sin timeouts.
-      nbMark('loader: frames ready');
+      // 3) Fuentes (loader y hero) + imágenes críticas del destino del skip:
+      // el header y el hero ya están en el DOM y sus <img> son eager, así
+      // que se pueden decodificar ahora. Condiciones reales, sin timeouts.
       await Promise.all([
         'fonts' in document ? document.fonts.ready.then(() => undefined, () => undefined) : Promise.resolve(),
         decodePostIntroCriticalImages().then(() => nbMark('loader: destination images decoded')),
       ]);
       if (cancelled) return;
+      setLoadProgress(100);
       nbMark('loader: ready');
       setPhase('ready');
     })();
 
     return () => {
       cancelled = true;
+      if (repaintRafRef.current) {
+        window.cancelAnimationFrame(repaintRafRef.current);
+        repaintRafRef.current = 0;
+      }
+      cache.dispose(); // cierra todos los ImageBitmap, vacía la cola
+      if (cacheRef.current === cache) cacheRef.current = null;
     };
-  }, [retryTick]);
+  }, [retryTick, onFrameReady]);
 
   const handleRetryLoad = useCallback(() => {
-    framesRef.current = new Array(TOTAL_FRAMES).fill(null);
     setRetryTick((n) => n + 1);
   }, []);
 
@@ -460,14 +524,6 @@ function MobileFrameSequence() {
     };
   }, [phase, render]);
 
-  // --- Limpieza al desmontar ---------------------------------------------
-
-  useEffect(() => {
-    return () => {
-      framesRef.current = new Array(TOTAL_FRAMES).fill(null);
-    };
-  }, []);
-
   // --- Saltar intro: navegar, nada más -----------------------------------
 
   /**
@@ -481,7 +537,7 @@ function MobileFrameSequence() {
    *     mismo tick, sin esperar al evento de scroll.
    */
   const handleSkip = useCallback(() => {
-    nbMark('tap', { scrollY: Math.round(window.scrollY) });
+    nbMark('tap', { scrollY: Math.round(window.scrollY), ...(cacheRef.current?.stats() ?? {}) });
     (document.activeElement as HTMLElement | null)?.blur?.();
     const target = document.getElementById(POST_INTRO_TARGET_ID);
     nbMark('target', {
