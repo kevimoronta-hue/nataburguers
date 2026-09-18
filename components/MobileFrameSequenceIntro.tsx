@@ -199,6 +199,12 @@ function MobileFrameSequence() {
 
   const skippingRef = useRef(false);
   const doneRef = useRef(false);
+  // Generación del salto en curso. Cada clic en "Saltar intro" la
+  // incrementa; los callbacks (rAF) de ese clic solo actúan si siguen
+  // siendo la generación vigente. Así, si por lo que sea un callback de
+  // un salto anterior tardara en ejecutarse, queda invalidado en vez de
+  // pisar el resultado del salto más reciente.
+  const skipTokenRef = useRef(0);
 
   const readinessRef = useRef({
     allFramesReady: false, // fetch + decode de las 193, completo
@@ -568,6 +574,7 @@ function MobileFrameSequence() {
     // clics posteriores separados en el tiempo.
     if (skippingRef.current) return;
     skippingRef.current = true;
+    const token = ++skipTokenRef.current;
 
     // Un <button> que sigue enfocado puede hacer que iOS intente
     // "recentrar" el scroll sobre él en cuanto su posición cambia bajo el
@@ -607,8 +614,10 @@ function MobileFrameSequence() {
       // frames sucesivos; el render loop de la secuencia sigue vivo y
       // solo se pausa mientras dura esta breve transición.
       window.requestAnimationFrame(() => {
+        if (skipTokenRef.current !== token) return; // superado por un clic más reciente
         setContentRevealed(true);
         window.requestAnimationFrame(() => {
+          if (skipTokenRef.current !== token) return;
           jumpToMainContent();
           skippingRef.current = false;
         });
