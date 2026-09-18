@@ -556,10 +556,13 @@ function MobileFrameSequence() {
     // dedo: se le quita el foco antes de mover nada.
     (document.activeElement as HTMLElement | null)?.blur?.();
 
-    // Paso 1: fija la intro en su estado final (frame, navbar, badge) SIN
-    // tocar todavía el resto del DOM. El badge queda oculto/no-interactivo
-    // de inmediato (badgeVisual en LAST_INDEX), lo que ya bloquea un
-    // segundo tap mientras dura la transición.
+    // Todo en el MISMO tick, de forma síncrona: encadenar el salto a
+    // través de varios requestAnimationFrame demostró ser frágil en iOS
+    // (cualquier gesto o repintado pesado entre medias puede desalinear
+    // los pasos). leer `getBoundingClientRect()` ya fuerza un reflow
+    // síncrono, así que el layout que medimos abajo es el real en el
+    // instante exacto en que lo medimos — no hace falta esperar frames
+    // "para que se estabilice". Prioridad: fiabilidad > animación.
     const canvas = canvasRef.current;
     const ctx = getCtx();
     if (canvas && ctx) {
@@ -569,52 +572,21 @@ function MobileFrameSequence() {
       updateBadge(LAST_INDEX);
     }
     updateNavbar(LAST_INDEX);
+    setContentRevealed(true);
 
-    // Paso 2 (frame siguiente): revela main/footer/cartbar. En iOS, hacer
-    // esto (display:none → block de un subárbol grande, que además
-    // dispara la carga de sus imágenes) en el MISMO tick que un salto de
-    // scroll de ~450vh es lo que produce el freeze / la transición lenta.
-    // Se separa en su propio frame.
-    window.requestAnimationFrame(() => {
-      setContentRevealed(true);
+    const target = document.getElementById('main-content');
+    if (target) {
+      const html = document.documentElement;
+      const prevScrollBehavior = html.style.scrollBehavior;
+      html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
+      const top = target.getBoundingClientRect().top + window.scrollY;
+      window.scrollTo(0, top); // salto directo por pixel, NUNCA scrollIntoView
+      html.style.scrollBehavior = prevScrollBehavior;
+    }
 
-      // Paso 3 (otro frame más): deja que Safari termine de aplicar el
-      // layout del contenido recién revelado antes de leer su posición
-      // real y saltar el scroll.
-      window.requestAnimationFrame(() => {
-        const target = document.getElementById('main-content');
-        if (!target) {
-          skippingRef.current = false;
-          return;
-        }
-
-        const html = document.documentElement;
-        const prevScrollBehavior = html.style.scrollBehavior;
-        html.style.scrollBehavior = 'auto'; // evita que 'smooth' recorra la intro visualmente
-
-        // Salto directo por pixel, NUNCA scrollIntoView: en iOS,
-        // scrollIntoView dentro de un ancestro sticky puede quedar
-        // peleando con el momentum scroll todavía activo o con el cambio
-        // de altura de la toolbar dinámica de Safari.
-        //
-        // Importante: UNA sola corrección en el frame siguiente, no una
-        // pelea prolongada contra el motor de scroll. Forzar scrollTo en
-        // cada rAF durante cientos de ms entra en conflicto con el
-        // rebote elástico nativo de iOS y es lo que producía la
-        // inestabilidad real de la página tras el skip.
-        const jump = () => {
-          const top = target.getBoundingClientRect().top + window.scrollY;
-          window.scrollTo(0, top);
-        };
-
-        jump();
-        window.requestAnimationFrame(() => {
-          jump(); // corrige un posible desvío puntual (toolbar / resto de momentum)
-          html.style.scrollBehavior = prevScrollBehavior;
-          skippingRef.current = false;
-        });
-      });
-    });
+    // Sin trabajo asíncrono pendiente: el candado solo protegía este
+    // mismo tick síncrono, así que se libera de inmediato.
+    skippingRef.current = false;
   }, [getCtx, setContentRevealed, updateBadge, updateNavbar]);
 
   // ---------------------------------------------------------------------

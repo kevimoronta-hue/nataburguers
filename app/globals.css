@@ -10,6 +10,11 @@
   html {
     scroll-behavior: smooth;
     background-color: theme('colors.bg.base');
+    /* En iOS, el elemento que realmente hace de raíz de scroll es <html>,
+       no <body>: si solo <body> tiene overflow-x:hidden, un gesto lateral
+       aún puede arrastrar la página (rebote elástico) antes de que el
+       clip surta efecto. */
+    overflow-x: hidden;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -118,6 +123,14 @@
 .nb-intro-scroll {
   position: relative;
   width: 100%;
+  /* Causa real del "deslizamiento" horizontal de la escena: sin esto, el
+     navegador reconoce un gesto de swipe lateral sobre la intro como un
+     posible pan/scroll horizontal antes de decidir que no hay nada que
+     desplazar, y en iOS eso se traduce en un arrastre elástico visible.
+     Restringir el gesto a vertical-only lo impide de raíz, no solo lo
+     recorta después con overflow. */
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
 }
 
 .nb-intro-sticky {
@@ -127,6 +140,8 @@
   width: 100%;
   overflow: hidden;
   background: #080706;
+  touch-action: pan-y;
+  overscroll-behavior-x: contain;
 }
 
 .nb-intro-canvas {
