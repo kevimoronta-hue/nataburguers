@@ -103,11 +103,6 @@
     display: none;
   }
 
-  /* TEMP DEBUG: ?noembers — aísla el coste de las capas blur del Hero. */
-  html.nb-noembers .hero-embers {
-    display: none;
-  }
-
   /* TEMP DEBUG: ?noglass — header sin backdrop-filter (liquid glass). */
   html.nb-noglass .site-header > div {
     backdrop-filter: none;

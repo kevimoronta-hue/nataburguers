@@ -18,15 +18,37 @@ const EMBERS = [
 
 export function Embers() {
   return (
-    <div aria-hidden="true" className="hero-embers pointer-events-none absolute inset-0 overflow-hidden">
-      {/* Calor naranja difuso */}
+    <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+      {/*
+        Calor naranja difuso. Antes: dos elipses con `filter: blur(120px)`.
+        En WebKit iOS ese filtro se rasterizaba en CPU sobre ~2900×2300 px
+        al primer paint del Hero (= al saltar la intro) y congelaba la
+        página varios segundos. Ahora la misma mancha de luz se dibuja
+        directamente con un radial-gradient de caída suave, sin `filter`:
+        la caja se agranda 120px por lado (el radio que antes añadía el
+        blur) para conservar la misma huella, posición e intensidad.
+      */}
       <div
-        className="absolute -left-1/4 top-0 h-[520px] w-[720px] rounded-full opacity-40 blur-[120px]"
-        style={{ background: 'radial-gradient(closest-side, #8f2d00, transparent)' }}
+        className="absolute rounded-full opacity-40"
+        style={{
+          left: 'calc(-25% - 120px)',
+          top: -120,
+          width: 960,
+          height: 760,
+          background:
+            'radial-gradient(ellipse closest-side, rgba(143,45,0,1) 0%, rgba(143,45,0,0.72) 28%, rgba(143,45,0,0.34) 56%, rgba(143,45,0,0.1) 80%, rgba(143,45,0,0) 100%)',
+        }}
       />
       <div
-        className="absolute -right-24 top-32 h-[420px] w-[520px] rounded-full opacity-30 blur-[120px]"
-        style={{ background: 'radial-gradient(closest-side, #d94300, transparent)' }}
+        className="absolute rounded-full opacity-30"
+        style={{
+          right: -216,
+          top: 8,
+          width: 760,
+          height: 660,
+          background:
+            'radial-gradient(ellipse closest-side, rgba(217,67,0,1) 0%, rgba(217,67,0,0.72) 28%, rgba(217,67,0,0.34) 56%, rgba(217,67,0,0.1) 80%, rgba(217,67,0,0) 100%)',
+        }}
       />
 
       {/* Textura de parrilla, al 8% como máximo */}

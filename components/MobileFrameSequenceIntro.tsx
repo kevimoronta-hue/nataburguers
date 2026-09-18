@@ -83,8 +83,6 @@ const PAST_INTRO_CLASS = 'nb-past-intro';
 const NB_DEBUG = typeof window !== 'undefined' && /[?&]nbdebug/.test(window.location.search);
 /** ?nointro: sin secuencia (para aislar intro vs. resto de la página). */
 const NB_NO_INTRO = typeof window !== 'undefined' && /[?&]nointro/.test(window.location.search);
-/** ?noembers: oculta lueurs/brasas del Hero (capas blur(120px)). */
-const NB_NO_EMBERS = typeof window !== 'undefined' && /[?&]noembers/.test(window.location.search);
 let nbDebugT0 = 0;
 let nbDebugEl: HTMLPreElement | null = null;
 
@@ -268,7 +266,6 @@ export function MobileFrameSequenceIntro() {
   const [mode, setMode] = useState<Mode>('none');
 
   useEffect(() => {
-    if (NB_NO_EMBERS) document.documentElement.classList.add('nb-noembers'); // TEMP DEBUG
     if (/[?&]noglass/.test(window.location.search)) document.documentElement.classList.add('nb-noglass'); // TEMP DEBUG
     const mobile = window.matchMedia(MOBILE_QUERY);
     const reduced = window.matchMedia(REDUCED_MOTION_QUERY);
