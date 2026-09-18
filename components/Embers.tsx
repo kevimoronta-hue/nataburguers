@@ -18,7 +18,7 @@ const EMBERS = [
 
 export function Embers() {
   return (
-    <div aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden">
+    <div aria-hidden="true" className="hero-embers pointer-events-none absolute inset-0 overflow-hidden">
       {/* Calor naranja difuso */}
       <div
         className="absolute -left-1/4 top-0 h-[520px] w-[720px] rounded-full opacity-40 blur-[120px]"

@@ -81,8 +81,30 @@ const PAST_INTRO_CLASS = 'nb-past-intro';
 // --- TEMP DEBUG (iOS): añade ?nbdebug a la URL para ver una línea de
 // tiempo del skip en pantalla y en consola. Quitar cuando se cierre el bug.
 const NB_DEBUG = typeof window !== 'undefined' && /[?&]nbdebug/.test(window.location.search);
+/** ?nointro: sin secuencia (para aislar intro vs. resto de la página). */
+const NB_NO_INTRO = typeof window !== 'undefined' && /[?&]nointro/.test(window.location.search);
+/** ?noembers: oculta lueurs/brasas del Hero (capas blur(120px)). */
+const NB_NO_EMBERS = typeof window !== 'undefined' && /[?&]noembers/.test(window.location.search);
 let nbDebugT0 = 0;
 let nbDebugEl: HTMLPreElement | null = null;
+
+/** Detector de bloqueo del hilo principal: huecos entre frames > 100 ms durante 6 s tras el tap. */
+function nbWatchMainThread() {
+  if (!NB_DEBUG) return;
+  const start = performance.now();
+  let last = start;
+  let worst = 0;
+  function tick() {
+    const now = performance.now();
+    const gap = now - last;
+    if (gap > 100) nbMark('MAIN THREAD BLOCKED', { ms: Math.round(gap), scrollY: Math.round(window.scrollY) });
+    worst = Math.max(worst, gap);
+    last = now;
+    if (now - start < 6000) window.requestAnimationFrame(tick);
+    else nbMark('watch end', { worstGapMs: Math.round(worst), scrollY: Math.round(window.scrollY) });
+  }
+  window.requestAnimationFrame(tick);
+}
 function nbMark(label: string, extra?: Record<string, unknown>) {
   if (!NB_DEBUG) return;
   const t = performance.now();
@@ -246,10 +268,11 @@ export function MobileFrameSequenceIntro() {
   const [mode, setMode] = useState<Mode>('none');
 
   useEffect(() => {
+    if (NB_NO_EMBERS) document.documentElement.classList.add('nb-noembers'); // TEMP DEBUG
     const mobile = window.matchMedia(MOBILE_QUERY);
     const reduced = window.matchMedia(REDUCED_MOTION_QUERY);
     function apply() {
-      setMode(!mobile.matches ? 'none' : reduced.matches ? 'static' : 'sequence');
+      setMode(!mobile.matches ? 'none' : reduced.matches || NB_NO_INTRO ? 'static' : 'sequence');
     }
     apply();
     mobile.addEventListener('change', apply);
@@ -549,6 +572,7 @@ function MobileFrameSequence() {
     render();
     if (NB_DEBUG) {
       window.requestAnimationFrame(() => nbMark('next rAF', { scrollY: Math.round(window.scrollY) }));
+      nbWatchMainThread();
     }
   }, [render]);
 

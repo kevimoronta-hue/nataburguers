@@ -103,6 +103,11 @@
     display: none;
   }
 
+  /* TEMP DEBUG: ?noembers — aísla el coste de las capas blur del Hero. */
+  html.nb-noembers .hero-embers {
+    display: none;
+  }
+
   /*
    * La navbar NO depende de `nb-content-revealed`: aparece progresivamente
    * sobre las últimas frames (168→184), mientras el canvas sigue visible.
