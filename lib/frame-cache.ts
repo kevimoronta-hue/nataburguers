@@ -37,12 +37,15 @@ export interface FrameCacheOptions {
 
 const supportsImageBitmap = typeof createImageBitmap === 'function';
 
-async function decodeViaBitmap(url: string): Promise<ImageBitmap> {
-  const res = await fetch(url, { cache: 'force-cache' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const blob = await res.blob();
-  return createImageBitmap(blob);
-}
+/**
+ * Velocidad (frames/ms) a partir de la cual la ventana se vuelca hacia
+ * delante: con el mismo presupuesto de frames, menos detrás y más
+ * delante, para que un fling encuentre frames ya decodificadas.
+ * 0.12 frames/ms ≈ 120 frames/s ≈ un swipe normal-rápido en 450vh.
+ */
+const FAST_VELOCITY = 0.12;
+/** En modo rápido se conservan como mínimo estas frames detrás. */
+const FAST_MIN_BEHIND = 3;
 
 function decodeViaImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -56,13 +59,28 @@ function decodeViaImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
+/**
+ * Decode de una frame:
+ *  1. `<img>` + `decode()`: el navegador decodifica fuera del hilo
+ *     principal (WebKit y Chrome);
+ *  2. copia a `ImageBitmap` (`createImageBitmap(img)`, sin volver a
+ *     decodificar): memoria propia, NO descartable por la caché de
+ *     imágenes del navegador (Chrome purga los `<img>` decodificados que
+ *     no están en el documento y los vuelve a decodificar en `drawImage`,
+ *     en el hilo principal: ahí estaba el "tirón" en Android) y liberable
+ *     con `close()` en el acto.
+ * Si no hay `createImageBitmap`, se conserva el `<img>`.
+ */
 async function decodeFrame(url: string): Promise<FrameSource> {
+  const img = await decodeViaImage(url);
+  if (!supportsImageBitmap) return img;
   try {
-    return await decodeViaImage(url);
+    const bitmap = await createImageBitmap(img);
+    img.src = '';
+    return bitmap;
   } catch {
-    if (!supportsImageBitmap) throw new Error('decode failed');
+    return img;
   }
-  return decodeViaBitmap(url);
 }
 
 /** Libera la frame: close() explícito si es ImageBitmap; un <img> se suelta al perder la referencia. */
@@ -77,10 +95,20 @@ export class FrameCache {
   private queue: number[] = [];
   private target = 0;
   private direction: 1 | -1 = 1;
+  private fast = false;
+  private lastTargetAt = 0;
   private lo = 0;
   private hi = 0;
   private disposed = false;
   private idleWaiters: Array<() => void> = [];
+
+  // Contadores (debug): coste real del motor en el dispositivo.
+  private hits = 0;
+  private misses = 0;
+  private evictions = 0;
+  private decodeCount = 0;
+  private decodeMsTotal = 0;
+  private maxDistance = 0;
 
   constructor(private readonly opts: FrameCacheOptions) {
     this.computeWindow();
@@ -91,29 +119,63 @@ export class FrameCache {
     return this.decoded.get(index);
   }
 
-  /** Frame decodificada más cercana a `index` (o null si no hay ninguna). */
+  /** Frame decodificada más cercana a `index` (o null si no hay ninguna). Cuenta hit/miss. */
   nearest(index: number): { index: number; frame: FrameSource } | null {
     const exact = this.decoded.get(index);
-    if (exact) return { index, frame: exact };
+    if (exact) {
+      this.hits += 1;
+      return { index, frame: exact };
+    }
+    this.misses += 1;
     for (let d = 1; d < this.opts.total; d += 1) {
       const before = this.decoded.get(index - d);
-      if (before) return { index: index - d, frame: before };
+      if (before) {
+        this.maxDistance = Math.max(this.maxDistance, d);
+        return { index: index - d, frame: before };
+      }
       const after = this.decoded.get(index + d);
-      if (after) return { index: index + d, frame: after };
+      if (after) {
+        this.maxDistance = Math.max(this.maxDistance, d);
+        return { index: index + d, frame: after };
+      }
     }
     return null;
   }
 
-  /** Nueva frame objetivo: reorienta la ventana, evicta, reprioriza la cola. */
+  /**
+   * Nueva frame objetivo: reorienta la ventana (dirección y velocidad),
+   * evicta, reprioriza la cola. La velocidad no cambia el presupuesto de
+   * frames, solo su reparto detrás/delante.
+   */
   setTarget(index: number) {
     if (this.disposed) return;
     const clamped = Math.min(Math.max(index, 0), this.opts.total - 1);
-    if (clamped !== this.target) this.direction = clamped > this.target ? 1 : -1;
+    const now = performance.now();
+    if (clamped !== this.target) {
+      this.direction = clamped > this.target ? 1 : -1;
+      const dt = now - this.lastTargetAt;
+      const velocity = dt > 0 ? Math.abs(clamped - this.target) / dt : 0;
+      this.fast = velocity >= FAST_VELOCITY;
+      this.lastTargetAt = now;
+    } else if (now - this.lastTargetAt > 250) {
+      this.fast = false; // parado: ventana equilibrada otra vez
+    }
     this.target = clamped;
     this.computeWindow();
     this.evict();
     this.rebuildQueue();
     this.pump();
+  }
+
+  /**
+   * Primera carga: el primer gesto es casi siempre un swipe hacia abajo,
+   * así que la ventana inicial se vuelca entera hacia delante.
+   */
+  prime(index: number) {
+    this.fast = true;
+    this.direction = 1;
+    this.lastTargetAt = performance.now();
+    this.setTarget(index);
   }
 
   /** Resuelve cuando no queda nada en cola ni en curso. */
@@ -126,9 +188,15 @@ export class FrameCache {
     return {
       target: this.target,
       window: [this.lo, this.hi] as const,
+      fast: this.fast,
       decoded: this.decoded.size,
       inFlight: this.inFlight.size,
       queued: this.queue.length,
+      hits: this.hits,
+      misses: this.misses,
+      evictions: this.evictions,
+      decodeMsAvg: this.decodeCount ? Math.round(this.decodeMsTotal / this.decodeCount) : 0,
+      maxDistance: this.maxDistance,
     };
   }
 
@@ -144,10 +212,24 @@ export class FrameCache {
 
   private computeWindow() {
     const { behind, ahead, total } = this.opts;
-    const back = this.direction === 1 ? behind : ahead;
-    const front = this.direction === 1 ? ahead : behind;
-    this.lo = Math.max(0, this.target - back);
-    this.hi = Math.min(total - 1, this.target + front);
+    // Mismo presupuesto (behind + ahead) siempre; en rápido casi todo delante.
+    const budget = behind + ahead;
+    const back = this.fast ? FAST_MIN_BEHIND : behind;
+    const front = budget - back;
+    let lo = this.direction === 1 ? this.target - back : this.target - front;
+    let hi = this.direction === 1 ? this.target + front : this.target + back;
+    // En los extremos de la secuencia el presupuesto que no cabe por un
+    // lado se traslada al otro (p. ej. al inicio: frames 0-22, no 0-19).
+    if (lo < 0) {
+      hi += -lo;
+      lo = 0;
+    }
+    if (hi > total - 1) {
+      lo -= hi - (total - 1);
+      hi = total - 1;
+    }
+    this.lo = Math.max(0, lo);
+    this.hi = Math.min(total - 1, hi);
   }
 
   private inWindow(index: number) {
@@ -167,13 +249,24 @@ export class FrameCache {
    * que pintar; se cierra en cuanto llega la primera frame de la ventana.
    */
   private evict() {
-    const anchor = this.hasDecodedInWindow() ? null : this.nearest(this.target)?.index ?? null;
+    const anchor = this.hasDecodedInWindow() ? null : this.nearestIndex(this.target);
     for (const [index, frame] of this.decoded) {
       if (!this.inWindow(index) && index !== anchor) {
         release(frame);
         this.decoded.delete(index);
+        this.evictions += 1;
       }
     }
+  }
+
+  /** Índice decodificado más cercano (sin contar hit/miss). */
+  private nearestIndex(index: number): number | null {
+    if (this.decoded.has(index)) return index;
+    for (let d = 1; d < this.opts.total; d += 1) {
+      if (this.decoded.has(index - d)) return index - d;
+      if (this.decoded.has(index + d)) return index + d;
+    }
+    return null;
   }
 
   /** Cola ordenada por distancia al objetivo; solo frames de la ventana aún no listas. */
@@ -193,8 +286,13 @@ export class FrameCache {
     while (!this.disposed && this.inFlight.size < this.opts.concurrency && this.queue.length > 0) {
       const index = this.queue.shift() as number;
       this.inFlight.add(index);
+      const startedAt = performance.now();
       decodeFrame(this.opts.src(index)).then(
-        (frame) => this.settle(index, frame),
+        (frame) => {
+          this.decodeCount += 1;
+          this.decodeMsTotal += performance.now() - startedAt;
+          this.settle(index, frame);
+        },
         () => this.settle(index, null),
       );
     }

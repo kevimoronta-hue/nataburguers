@@ -18,8 +18,10 @@ import { lockScroll, scrollToSection, unlockScroll } from '@/lib/scroll';
  *
  *  MEMORIA — las 193 frames se descargan una vez (cache HTTP), pero solo
  *    una ventana de ~23 frames alrededor del objetivo está decodificada
- *    (ImageBitmap, ~130 MB máx.), con más margen en la dirección del
- *    scroll. Lo que sale de la ventana se cierra en el acto. Si la frame
+ *    (<img>.decode() fuera del hilo principal → copia a ImageBitmap no
+ *    descartable, ~130 MB máx.), con más margen en la dirección del
+ *    scroll y casi todo delante durante un swipe rápido. Lo que sale de
+ *    la ventana se cierra en el acto. Si la frame
  *    exacta aún no está lista se pinta la decodificada más cercana y se
  *    sustituye en cuanto llega (latest-position-wins, nunca vacío). Ver
  *    lib/frame-cache.ts. Mismo motor en Android e iOS.
@@ -68,10 +70,15 @@ const MAX_RETRIES = 3;
 /** Reparto del progreso mostrado: el fetch (red) y luego la primera ventana (decode). */
 const FETCH_PROGRESS_SHARE = 0.85;
 
-/** Ventana decodificada: objetivo + 8 detrás + 14 delante (en la dirección del scroll). */
+/**
+ * Ventana decodificada: 22 frames + objetivo (≈130 MB máx.). En reposo
+ * 8 detrás / 14 delante en la dirección del scroll; en un swipe rápido
+ * el mismo presupuesto se vuelca hacia delante (3 detrás / 19 delante).
+ */
 const WINDOW_BEHIND = 8;
 const WINDOW_AHEAD = 14;
-const DECODE_CONCURRENCY = 4;
+/** 6 decodes en paralelo (como la versión anterior); decode fuera del hilo principal. */
+const DECODE_CONCURRENCY = 6;
 
 /** Clase one-way en <html>: main/footer están en el flujo. */
 const REVEALED_CLASS = 'nb-content-revealed';
@@ -460,8 +467,9 @@ function MobileFrameSequence() {
       }
       nbMark('loader: network cache ready');
 
-      // 2) Decodificar solo la primera ventana (objetivo 0 + 14 delante).
-      cache.setTarget(0);
+      // 2) Decodificar solo la primera ventana, volcada hacia delante
+      // (frames 0-22): absorbe el primer swipe grande sin frames frías.
+      cache.prime(0);
       await cache.whenIdle();
       if (cancelled) return;
       if (!cache.get(0)) {
